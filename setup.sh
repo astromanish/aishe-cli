@@ -5,6 +5,8 @@ set -euo pipefail
 #  Aishe CLI — One-Command Setup
 #  "Voice-first AI assistant for your terminal"
 #
+#  Supports: macOS, Linux, Windows (Git Bash / WSL)
+#
 #  Usage:
 #    curl -fsSL https://raw.githubusercontent.com/astromanish/aishe-cli/main/setup.sh | bash
 #    # or: bash setup.sh  (after cloning)
@@ -33,16 +35,21 @@ echo ""
 # ── Detect platform ────────────────────────────────────────
 PLATFORM="$(uname -s)"
 ARCH="$(uname -m)"
-info "Detected: ${PLATFORM} ${ARCH}"
+case "$PLATFORM" in
+    Darwin)  OS_NAME="macOS" ;;
+    Linux)   OS_NAME="Linux" ;;
+    MINGW*|MSYS*|CYGWIN*) OS_NAME="Windows" ;;
+    *)       OS_NAME="$PLATFORM" ;;
+esac
+info "Detected: ${OS_NAME} ${ARCH}"
 
 # ── Self-install: if running from a temp dir, clone first ──
 SCRIPT_SRC="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "/tmp")"
 INSTALL_DIR="${HOME}/.local/share/aishe-cli"
 
-if echo "$SCRIPT_SRC" | grep -q "/tmp/" || [ ! -f "${SCRIPT_SRC}/aishe" ]; then
+if echo "$SCRIPT_SRC" | grep -Eq "/tmp/|/Temp/|/temp/" || [ ! -f "${SCRIPT_SRC}/aishe" ]; then
     info "Running from temporary location — cloning repo to ${INSTALL_DIR}"
 
-    # Check for git
     if ! command -v git &>/dev/null; then
         fail "git is required. Install it first."
         exit 1
@@ -52,17 +59,15 @@ if echo "$SCRIPT_SRC" | grep -q "/tmp/" || [ ! -f "${SCRIPT_SRC}/aishe" ]; then
     git clone --depth 1 https://github.com/astromanish/aishe-cli.git "$INSTALL_DIR" 2>&1 | tail -1
     pass "Cloned to ${INSTALL_DIR}"
 
-    # Re-execute setup from the cloned location
     exec bash "${INSTALL_DIR}/setup.sh"
 fi
 
-# If we get here, SCRIPT_SRC is a persistent location with the aishe file
 info "Running from ${SCRIPT_SRC}"
 
 # ── 1. Python check ─────────────────────────────────────────
 echo -e "\n  ${BOLD}1. Python${NC}"
 PYTHON=""
-for cmd in python3 python; do
+for cmd in python3 python python.exe; do
     if command -v "$cmd" &>/dev/null; then
         fullver=$("$cmd" --version 2>&1)
         ver=$(echo "$fullver" | awk '{print $2}' | cut -d. -f1,2)
@@ -105,13 +110,11 @@ echo -e "\n  ${BOLD}3. External Tools${NC}"
 if command -v ffmpeg &>/dev/null; then
     pass "ffmpeg found at $(command -v ffmpeg)"
 else
-    if [[ "$PLATFORM" == "Darwin" ]]; then
-        warn "ffmpeg not found. Install: brew install ffmpeg"
-    elif command -v apt-get &>/dev/null; then
-        warn "ffmpeg not found. Install: sudo apt-get install ffmpeg"
-    else
-        warn "ffmpeg not found — needed for mic recording"
-    fi
+    case "$OS_NAME" in
+        macOS)  warn "ffmpeg not found. Install: brew install ffmpeg" ;;
+        Linux)  warn "ffmpeg not found. Install: sudo apt-get install ffmpeg  (or pacman -S ffmpeg)" ;;
+        Windows) warn "ffmpeg not found. Download: https://ffmpeg.org/download.html" ;;
+    esac
 fi
 
 # ollama
@@ -123,37 +126,57 @@ fi
 
 # ── 4. Symlink to PATH ────────────────────────────────────
 echo -e "\n  ${BOLD}4. Install aishe Command${NC}"
-TARGET_DIR="${HOME}/.local/bin"
-mkdir -p "$TARGET_DIR"
-TARGET="${TARGET_DIR}/aishe"
 
-if [ -L "$TARGET" ] && [ "$(readlink "$TARGET")" = "${SCRIPT_SRC}/aishe" ]; then
-    pass "aishe already linked to ${TARGET}"
-else
-    ln -sf "${SCRIPT_SRC}/aishe" "$TARGET"
-    chmod +x "${SCRIPT_SRC}/aishe"
-    pass "Linked aishe → ${TARGET}"
-fi
+case "$OS_NAME" in
+    Windows)
+        TARGET_DIR="${HOME}/AppData/Local/Programs/aishe"
+        TARGET="${TARGET_DIR}/aishe"
+        mkdir -p "$TARGET_DIR"
+        cp "${SCRIPT_SRC}/aishe" "$TARGET"
+        cp -r "${SCRIPT_SRC}/aishe_pkg" "${TARGET_DIR}/aishe_pkg"
+        pass "Installed aishe to ${TARGET}"
+        warn "Add ${TARGET_DIR} to your PATH manually"
+        ;;
+    *)
+        TARGET_DIR="${HOME}/.local/bin"
+        mkdir -p "$TARGET_DIR"
+        TARGET="${TARGET_DIR}/aishe"
 
-# Check if TARGET_DIR is in PATH
-if [[ ":$PATH:" != *":${TARGET_DIR}:"* ]]; then
-    warn "${TARGET_DIR} is not in your PATH"
-    info "Add this to your ~/.zshrc or ~/.bashrc:"
-    echo -e "       ${CYAN}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
-fi
+        if [ -L "$TARGET" ] && [ "$(readlink "$TARGET")" = "${SCRIPT_SRC}/aishe" ]; then
+            pass "aishe already linked to ${TARGET}"
+        else
+            ln -sf "${SCRIPT_SRC}/aishe" "$TARGET"
+            chmod +x "${SCRIPT_SRC}/aishe"
+            pass "Linked aishe → ${TARGET}"
+        fi
+
+        if [[ ":$PATH:" != *":${TARGET_DIR}:"* ]]; then
+            warn "${TARGET_DIR} is not in your PATH"
+            info "Add this to your shell config:"
+            echo -e "       ${CYAN}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+        fi
+        ;;
+esac
 
 # ── 5. Config directory ────────────────────────────────────
 echo -e "\n  ${BOLD}5. Configuration${NC}"
-CONFIG_DIR="${HOME}/.config/aishe"
-mkdir -p "$CONFIG_DIR"
 
-# Platform-appropriate data directory
-if [[ "$PLATFORM" == "Darwin" ]]; then
-    DEFAULT_DATA_DIR="${HOME}/Library/Application Support/aishe"
-else
-    # Linux / BSD / others
-    DEFAULT_DATA_DIR="${HOME}/.local/share/aishe"
-fi
+case "$OS_NAME" in
+    macOS)
+        CONFIG_DIR="${HOME}/.config/aishe"
+        DEFAULT_DATA_DIR="${HOME}/Library/Application Support/aishe"
+        ;;
+    Windows)
+        CONFIG_DIR="${HOME}/.config/aishe"
+        DEFAULT_DATA_DIR="${HOME}/AppData/Local/aishe"
+        ;;
+    *)
+        CONFIG_DIR="${HOME}/.config/aishe"
+        DEFAULT_DATA_DIR="${HOME}/.local/share/aishe"
+        ;;
+esac
+
+mkdir -p "$CONFIG_DIR"
 
 if [ ! -f "${CONFIG_DIR}/config.yaml" ]; then
     cat > "${CONFIG_DIR}/config.yaml" << YAMLEOF
@@ -194,8 +217,7 @@ echo ""
 echo -e "  ${CYAN}Next steps:${NC}"
 echo -e "  1. Start the required services:"
 echo -e "     ${DIM}  ollama serve &${NC}"
-echo -e "     ${DIM}  cd aishe-tauri/deepagent && .venv/bin/python server.py &${NC}"
-echo -e "     ${DIM}  # Parakeet STT and Supertonic TTS (see docs)${NC}"
+echo -e "     ${DIM}  # Start DeepAgent, Parakeet STT, Supertonic TTS (see docs)${NC}"
 echo ""
 echo -e "  2. Run: ${CYAN}aishe status${NC}"
 echo ""

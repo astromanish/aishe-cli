@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -18,6 +19,30 @@ from .util import bold, check, cyan, dim, green, red, yellow
 
 STT_URL = get("services.stt", "http://localhost:5093")
 TTS_URL = get("services.tts", "http://localhost:8766")
+
+_SYSTEM = platform.system()
+
+
+# ─── Platform audio playback ───────────────────────────────────────────────
+
+def _play_audio(path: str) -> None:
+    """Play a WAV file using the platform's native audio player."""
+    if _SYSTEM == "Darwin":
+        subprocess.run(["afplay", path], capture_output=True)
+    elif _SYSTEM == "Windows":
+        # Use PowerShell's SoundPlayer or built-in media player
+        subprocess.run(["powershell", "-c", f"(New-Object Media.SoundPlayer '{path}').PlaySync();"], capture_output=True)
+    elif _SYSTEM == "Linux":
+        # Try common Linux audio players
+        for player in ["aplay", "paplay", "ffplay", "pw-play"]:
+            if subprocess.run(["which", player], capture_output=True).returncode == 0:
+                subprocess.run([player, path], capture_output=True)
+                return
+        # Fallback: try ffmpeg
+        subprocess.run(["ffmpeg", "-i", path, "-f", "s16le", "-ar", "44100", "-ac", "1", "-"], capture_output=True)
+    else:
+        # Unknown OS — just log
+        print(dim(f"  Audio saved to {path} (no player for {_SYSTEM})"))
 
 
 # ─── STT ────────────────────────────────────────────────────────────────────
@@ -60,7 +85,7 @@ def synthesize(text: str, voice: str = "F4", play: bool = True) -> Optional[str]
         f.write(resp.content)
 
     if play:
-        subprocess.run(["afplay", outpath], capture_output=True)
+        _play_audio(outpath)
         os.unlink(outpath)
         return None
     return outpath
@@ -83,33 +108,87 @@ def tts_info() -> str:
 # ─── Mic recording ──────────────────────────────────────────────────────────
 
 def list_mic_devices() -> List[Tuple[int, str]]:
-    """List available macOS microphone devices via ffmpeg."""
+    """List available microphone devices via ffmpeg."""
     try:
-        r = subprocess.run(
-            ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-            capture_output=True, text=True, timeout=5,
-        )
-        devices: List[Tuple[int, str]] = []
-        in_audio = False
-        for line in (r.stdout + r.stderr).splitlines():
-            if "AVFoundation audio devices:" in line:
-                in_audio = True
-                continue
-            if in_audio and line.strip().startswith("["):
+        if _SYSTEM == "Darwin":
+            r = subprocess.run(
+                ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                capture_output=True, text=True, timeout=5,
+            )
+            devices: List[Tuple[int, str]] = []
+            in_audio = False
+            for line in (r.stdout + r.stderr).splitlines():
+                if "AVFoundation audio devices:" in line:
+                    in_audio = True
+                    continue
+                if in_audio and line.strip().startswith("["):
+                    m = re.search(r'\[(\d+)\]\s*(.+)', line.strip())
+                    if m:
+                        devices.append((int(m.group(1)), m.group(2).strip()))
+            return devices
+        elif _SYSTEM == "Linux":
+            # Linux: list ALSA/PulseAudio devices
+            r = subprocess.run(
+                ["ffmpeg", "-f", "alsa", "-list_devices", "true", "-i", ""],
+                capture_output=True, text=True, timeout=5,
+            )
+            devices = []
+            for line in (r.stdout + r.stderr).splitlines():
                 m = re.search(r'\[(\d+)\]\s*(.+)', line.strip())
                 if m:
                     devices.append((int(m.group(1)), m.group(2).strip()))
-        return devices
+            if not devices:
+                # Try PulseAudio
+                r2 = subprocess.run(
+                    ["ffmpeg", "-f", "pulse", "-list_devices", "true", "-i", ""],
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in (r2.stdout + r2.stderr).splitlines():
+                    m = re.search(r'\[(\d+)\]\s*(.+)', line.strip())
+                    if m:
+                        devices.append((int(m.group(1)), m.group(2).strip()))
+            return devices
+        elif _SYSTEM == "Windows":
+            # Windows: list DirectShow devices
+            r = subprocess.run(
+                ["ffmpeg", "-f", "dshow", "-list_devices", "true", "-i", ""],
+                capture_output=True, text=True, timeout=5,
+            )
+            devices = []
+            in_audio = False
+            for line in (r.stdout + r.stderr).splitlines():
+                if "DirectShow audio devices" in line or "Audio devices" in line:
+                    in_audio = True
+                    continue
+                if in_audio and '"' in line:
+                    m = re.search(r'"([^"]+)"', line)
+                    if m:
+                        devices.append((len(devices), m.group(1)))
+            return devices
+        else:
+            return []
     except Exception:
         return []
 
 
 def record_audio(duration: int, device_index: int, outpath: str) -> bool:
     """Record audio from mic via ffmpeg."""
+    if _SYSTEM == "Darwin":
+        input_spec = f":{device_index}"
+        fmt = "avfoundation"
+    elif _SYSTEM == "Linux":
+        input_spec = f"default:{device_index}"
+        fmt = "pulse"
+    elif _SYSTEM == "Windows":
+        input_spec = f"audio={device_index}"
+        fmt = "dshow"
+    else:
+        return False
+
     cmd = [
         "ffmpeg", "-y",
-        "-f", "avfoundation",
-        "-i", f":{device_index}",
+        "-f", fmt,
+        "-i", input_spec,
         "-t", str(duration),
         "-ar", "16000",
         "-ac", "1",
@@ -144,7 +223,6 @@ def record_with_vad(
     Falls back to fixed-duration recording if webrtcvad is not installed.
     """
     if not _vad_available():
-        # Fallback: record fixed duration
         return record_audio(5, device_index, outpath)
 
     import webrtcvad  # type: ignore
@@ -152,16 +230,28 @@ def record_with_vad(
     import struct
     import time
 
-    vad = webrtcvad.Vad(2)  # aggressiveness 0-3
+    vad = webrtcvad.Vad(2)
     sample_rate = 16000
-    frame_duration_ms = 30  # 30ms frames
-    frame_size = int(sample_rate * frame_duration_ms / 1000) * 2  # 16-bit samples
+    frame_duration_ms = 30
+    frame_size = int(sample_rate * frame_duration_ms / 1000) * 2
 
-    # Record in chunks, detect speech
+    # Determine ffmpeg input format based on platform
+    if _SYSTEM == "Darwin":
+        fmt = "avfoundation"
+        input_spec = f":{device_index}"
+    elif _SYSTEM == "Linux":
+        fmt = "pulse"
+        input_spec = f"default:{device_index}"
+    elif _SYSTEM == "Windows":
+        fmt = "dshow"
+        input_spec = f"audio={device_index}"
+    else:
+        return False
+
     cmd = [
         "ffmpeg", "-y",
-        "-f", "avfoundation",
-        "-i", f":{device_index}",
+        "-f", fmt,
+        "-i", input_spec,
         "-f", "s16le",
         "-ar", str(sample_rate),
         "-ac", "1",
@@ -195,11 +285,11 @@ def record_with_vad(
             if not recording and speech_frames >= frames_per_speech_ms:
                 recording = True
                 speech_detected = True
-                audio_chunks = []  # discard pre-speech buffer
+                audio_chunks = []
         else:
             silence_frames += 1
             if recording and silence_frames >= frames_per_silence_ms:
-                break  # silence detected, stop
+                break
 
         if recording:
             audio_chunks.append(raw)
@@ -212,7 +302,6 @@ def record_with_vad(
     if not speech_detected or not audio_chunks:
         return False
 
-    # Write WAV file
     import wave
     with wave.open(outpath, "wb") as wf:
         wf.setnchannels(1)

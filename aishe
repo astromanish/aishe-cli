@@ -27,10 +27,28 @@ Requirements: Python 3.9+, requests (pip install requests)
 """
 
 import os
+import platform
 import sys
 
-# Add common Homebrew paths for external tools
-os.environ["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
+# Platform-appropriate PATH additions
+_system = platform.system()
+if _system == "Darwin":
+    # macOS: Homebrew paths
+    os.environ["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
+elif _system == "Windows":
+    # Windows: add common Python Scripts paths
+    scripts_dirs = [
+        os.path.expanduser("~\\AppData\\Local\\Programs\\Python\\Python312\\Scripts"),
+        os.path.expanduser("~\\AppData\\Roaming\\Python\\Python312\\Scripts"),
+    ]
+    for d in scripts_dirs:
+        if os.path.isdir(d):
+            os.environ["PATH"] = f"{d};{os.environ.get('PATH', '')}"
+elif _system == "Linux":
+    # Linux: add ~/.local/bin (common for pip --user installs)
+    local_bin = os.path.expanduser("~/.local/bin")
+    if os.path.isdir(local_bin):
+        os.environ["PATH"] = f"{local_bin}:{os.environ.get('PATH', '')}"
 
 # Resolve the real path of this script (follows symlinks)
 script_path = os.path.realpath(os.path.abspath(__file__))

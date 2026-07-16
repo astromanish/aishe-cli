@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -388,7 +389,13 @@ def cmd_doctor(args: Any) -> None:
 
     # 3. External tools
     section("External Tools")
-    for tool in ["ffmpeg", "afplay", "ollama"]:
+    audio_players = {
+        "Darwin": "afplay",
+        "Windows": "powershell",
+        "Linux": "aplay",
+    }
+    audio_tool = audio_players.get(platform.system(), "aplay")
+    for tool in ["ffmpeg", audio_tool, "ollama"]:
         which = shutil.which(tool)
         print(f"  {status_dot(which is not None)} {tool:20s} {green(which) if which else red('not found')}")
 

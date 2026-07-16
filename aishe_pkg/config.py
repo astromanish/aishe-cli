@@ -14,14 +14,31 @@ except ImportError:
     yaml = None  # type: ignore
 
 
-# ─── Defaults ───────────────────────────────────────────────
+# ─── Platform paths ─────────────────────────────────────────
 
 def _default_data_dir() -> str:
     """Platform-appropriate data directory."""
-    if platform.system() == "Darwin":
+    system = platform.system()
+    if system == "Darwin":
         return str(Path.home() / "Library" / "Application Support" / "aishe")
+    elif system == "Windows":
+        return str(Path.home() / "AppData" / "Local" / "aishe")
     return str(Path.home() / ".local" / "share" / "aishe")
 
+
+def _default_config_dir() -> Path:
+    """Platform-appropriate config directory."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg) / "aishe"
+    return Path.home() / ".config" / "aishe"
+
+
+CONFIG_DIR = _default_config_dir()
+CONFIG_FILE = CONFIG_DIR / "config.yaml"
+
+
+# ─── Defaults ───────────────────────────────────────────────
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "services": {
@@ -45,9 +62,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "color": True,
     },
 }
-
-CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "aishe"
-CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 
 def get_config_path() -> Path:

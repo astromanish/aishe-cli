@@ -42,12 +42,25 @@ bash setup.sh
 
 - **Python 3.9+**
 - **`requests`** + **`pyyaml`** (auto-installed by setup script)
-- **`ffmpeg`** — for mic recording (`brew install ffmpeg` or `apt-get install ffmpeg`)
+- **`ffmpeg`** — for mic recording
+  - macOS: `brew install ffmpeg`
+  - Ubuntu/Debian: `sudo apt-get install ffmpeg`
+  - Windows: download from https://ffmpeg.org/download.html
 - **Running services:**
   - [Ollama](https://ollama.com) on `:11434` (local or cloud models)
   - [DeepAgent](https://github.com/langchain-ai/deepagents) sidecar on `:8765`
   - [Parakeet STT](https://github.com/nvidia/parakeet) on `:5093`
   - [Supertonic TTS](https://github.com/opencode-ai/supertonic-tts) on `:8766`
+
+## Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| **macOS** | ✅ Full | Native audio playback (`afplay`), AVFoundation mic recording |
+| **Linux** | ✅ Full | PulseAudio/ALSA mic recording, `aplay`/`paplay` playback |
+| **Windows** | ✅ Core | DirectShow mic recording, PowerShell audio playback |
+
+Voice features (STT/TTS) work on all platforms — they're HTTP services. Mic recording uses ffmpeg with the appropriate platform backend. Audio playback uses the native player for each OS.
 
 ## Usage
 
