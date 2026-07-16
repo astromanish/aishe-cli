@@ -4,6 +4,10 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────
 #  Aishe CLI — One-Command Setup
 #  "Voice-first AI assistant for your terminal"
+#
+#  Usage:
+#    curl -fsSL https://raw.githubusercontent.com/astromanish/aishe-cli/main/setup.sh | bash
+#    # or: bash setup.sh  (after cloning)
 # ─────────────────────────────────────────────────────────────
 
 BOLD='\033[1m'
@@ -31,13 +35,36 @@ PLATFORM="$(uname -s)"
 ARCH="$(uname -m)"
 info "Detected: ${PLATFORM} ${ARCH}"
 
+# ── Self-install: if running from a temp dir, clone first ──
+SCRIPT_SRC="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "/tmp")"
+INSTALL_DIR="${HOME}/.local/share/aishe-cli"
+
+if echo "$SCRIPT_SRC" | grep -q "/tmp/" || [ ! -f "${SCRIPT_SRC}/aishe" ]; then
+    info "Running from temporary location — cloning repo to ${INSTALL_DIR}"
+
+    # Check for git
+    if ! command -v git &>/dev/null; then
+        fail "git is required. Install it first."
+        exit 1
+    fi
+
+    rm -rf "$INSTALL_DIR"
+    git clone --depth 1 https://github.com/astromanish/aishe-cli.git "$INSTALL_DIR" 2>&1 | tail -1
+    pass "Cloned to ${INSTALL_DIR}"
+
+    # Re-execute setup from the cloned location
+    exec bash "${INSTALL_DIR}/setup.sh"
+fi
+
+# If we get here, SCRIPT_SRC is a persistent location with the aishe file
+info "Running from ${SCRIPT_SRC}"
+
 # ── 1. Python check ─────────────────────────────────────────
 echo -e "\n  ${BOLD}1. Python${NC}"
 PYTHON=""
 for cmd in python3 python; do
     if command -v "$cmd" &>/dev/null; then
         fullver=$("$cmd" --version 2>&1)
-        # Extract major.minor (e.g. "3.12" from "Python 3.12.13")
         ver=$(echo "$fullver" | awk '{print $2}' | cut -d. -f1,2)
         major=$(echo "$ver" | cut -d. -f1)
         if [ "$major" -ge 3 ]; then
@@ -96,16 +123,15 @@ fi
 
 # ── 4. Symlink to PATH ────────────────────────────────────
 echo -e "\n  ${BOLD}4. Install aishe Command${NC}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET_DIR="${HOME}/.local/bin"
 mkdir -p "$TARGET_DIR"
 TARGET="${TARGET_DIR}/aishe"
 
-if [ -L "$TARGET" ] && [ "$(readlink "$TARGET")" = "${SCRIPT_DIR}/aishe" ]; then
+if [ -L "$TARGET" ] && [ "$(readlink "$TARGET")" = "${SCRIPT_SRC}/aishe" ]; then
     pass "aishe already linked to ${TARGET}"
 else
-    ln -sf "${SCRIPT_DIR}/aishe" "$TARGET"
-    chmod +x "${SCRIPT_DIR}/aishe"
+    ln -sf "${SCRIPT_SRC}/aishe" "$TARGET"
+    chmod +x "${SCRIPT_SRC}/aishe"
     pass "Linked aishe → ${TARGET}"
 fi
 
@@ -120,8 +146,17 @@ fi
 echo -e "\n  ${BOLD}5. Configuration${NC}"
 CONFIG_DIR="${HOME}/.config/aishe"
 mkdir -p "$CONFIG_DIR"
+
+# Platform-appropriate data directory
+if [[ "$PLATFORM" == "Darwin" ]]; then
+    DEFAULT_DATA_DIR="${HOME}/Library/Application Support/aishe"
+else
+    # Linux / BSD / others
+    DEFAULT_DATA_DIR="${HOME}/.local/share/aishe"
+fi
+
 if [ ! -f "${CONFIG_DIR}/config.yaml" ]; then
-    cat > "${CONFIG_DIR}/config.yaml" << 'YAMLEOF'
+    cat > "${CONFIG_DIR}/config.yaml" << YAMLEOF
 # Aishe CLI Configuration
 services:
   deepagent: "http://localhost:8765"
@@ -136,7 +171,7 @@ voice:
   vad_min_speech_duration_ms: 250
   vad_min_silence_duration_ms: 500
 data:
-  dir: "~/Library/Application Support/aishe"
+  dir: "${DEFAULT_DATA_DIR}"
 ui:
   color: true
 YAMLEOF
@@ -147,9 +182,8 @@ fi
 
 # ── 6. Data directories ────────────────────────────────────
 echo -e "\n  ${BOLD}6. Data Directories${NC}"
-DATA_DIR="${HOME}/Library/Application Support/aishe"
-mkdir -p "${DATA_DIR}/memory" "${DATA_DIR}/threads" "${DATA_DIR}/intent_lab"
-pass "Created data directories at ${DATA_DIR}"
+mkdir -p "${DEFAULT_DATA_DIR}/memory" "${DEFAULT_DATA_DIR}/threads" "${DEFAULT_DATA_DIR}/intent_lab"
+pass "Created data directories at ${DEFAULT_DATA_DIR}"
 
 # ── Done ───────────────────────────────────────────────────
 echo ""

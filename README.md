@@ -29,12 +29,13 @@ aishe live
 ## Quick Install
 
 ```bash
-# One-command setup (installs deps, creates config, links to PATH)
+# One-command setup (auto-clones to ~/.local/share/aishe-cli)
 curl -fsSL https://raw.githubusercontent.com/astromanish/aishe-cli/main/setup.sh | bash
 
-# Or manually:
-pip install requests pyyaml
-ln -sf $(pwd)/aishe ~/.local/bin/aishe
+# Or clone first, then run setup:
+git clone https://github.com/astromanish/aishe-cli.git ~/aishe-cli
+cd ~/aishe-cli
+bash setup.sh
 ```
 
 ## Requirements

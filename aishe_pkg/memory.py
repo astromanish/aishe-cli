@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from .config import get
 from .util import bold, cyan, dim, green, red
 
-DATA_DIR = Path(get("data.dir", str(Path.home() / "Library" / "Application Support" / "aishe")))
+DATA_DIR = Path(get("data.dir", str(Path.home() / ".local" / "share" / "aishe")))
 MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_FILE = MEMORY_DIR / "facts.jsonl"
 

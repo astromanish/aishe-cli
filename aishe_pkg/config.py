@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import platform
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -13,7 +14,14 @@ except ImportError:
     yaml = None  # type: ignore
 
 
-# ─── Defaults ───────────────────────────────────────────────────────────────
+# ─── Defaults ───────────────────────────────────────────────
+
+def _default_data_dir() -> str:
+    """Platform-appropriate data directory."""
+    if platform.system() == "Darwin":
+        return str(Path.home() / "Library" / "Application Support" / "aishe")
+    return str(Path.home() / ".local" / "share" / "aishe")
+
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "services": {
@@ -31,7 +39,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "vad_min_silence_duration_ms": 500,
     },
     "data": {
-        "dir": str(Path.home() / "Library" / "Application Support" / "aishe"),
+        "dir": _default_data_dir(),
     },
     "ui": {
         "color": True,

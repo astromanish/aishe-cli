@@ -32,8 +32,9 @@ import sys
 # Add common Homebrew paths for external tools
 os.environ["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"
 
-# Ensure the package directory is on the path
-pkg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aishe_pkg")
+# Resolve the real path of this script (follows symlinks)
+script_path = os.path.realpath(os.path.abspath(__file__))
+pkg_dir = os.path.join(os.path.dirname(script_path), "aishe_pkg")
 if pkg_dir not in sys.path:
     sys.path.insert(0, os.path.dirname(pkg_dir))
 
