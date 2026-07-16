@@ -1,33 +1,41 @@
 # Aishe CLI
 
-**Voice-first AI assistant for your terminal.**
-
-Aishe CLI is a standalone command-line AI assistant with voice input/output, persistent memory, chat threads, tool calling, and live voice conversation — all from your terminal.
+**Voice-first AI assistant for your terminal.** Minimal interface, powerful internals.
 
 ```bash
 aishe status        # check all services
 aishe chat "hello"  # one-shot chat
-aishe live          # live voice conversation (press Enter to record)
+aishe live          # live voice conversation
+aishe repl          # continuous text chat
 ```
 
 ## Features
 
-- **Chat** — one-shot and streaming chat with tool calling (calculator, timezone, memory, and more)
-- **Live Voice** — press Enter, speak, get a spoken response back. Full duplex: record → STT → LLM → TTS → play
-- **Memory** — persistent personal memory. The AI remembers facts about you across sessions
+- **Chat** — one-shot (`aishe chat`) and streaming (`aishe stream`) with tool calling
+- **REPL** — `aishe repl` for continuous text conversation (no voice deps needed)
+- **Live Voice** — `aishe live` for full voice conversation: record → STT → LLM → TTS → play
+- **VAD Recording** — voice activity detection (via webrtcvad) for natural turn-taking
+- **Memory** — persistent personal memory across sessions
 - **Threads** — multiple conversation threads with history
 - **Voice I/O** — transcribe audio files, synthesize text to speech
 - **Ollama Integration** — list, pull, and manage models
 - **Intent Lab** — log and analyze user intent classification stats
+- **Search** — full-text search across all threads and memory
+- **Export** — export threads (Markdown) and memory (Markdown/CSV)
+- **Doctor** — comprehensive diagnostics (services, deps, roundtrip tests)
+- **Config** — YAML config file with `aishe config get/set`
+- **Shell Completions** — `aishe completions bash|zsh|fish`
 - **macOS** — native mic recording via AVFoundation, audio playback via `afplay`
 
 ## Requirements
 
-- **Python 3.12+**
+- **Python 3.9+**
 - **`requests`** — `pip install requests`
-- **`ffmpeg`** — for mic recording (`brew install ffmpeg`)
+- **`pyyaml`** — `pip install pyyaml` (for config)
+- **`webrtcvad`** — `pip install webrtcvad` (for VAD recording, optional)
+- **`ffmpeg`** — `brew install ffmpeg` (for mic recording)
 - **Running services:**
-  - [Ollama](https://ollama.com) on `:11434` (local or cloud models)
+  - [Ollama](https://ollama.com) on `:11434`
   - [DeepAgent](https://github.com/langchain-ai/deepagents) sidecar on `:8765`
   - [Parakeet STT](https://github.com/nvidia/parakeet) on `:5093`
   - [Supertonic TTS](https://github.com/opencode-ai/supertonic-tts) on `:8766`
@@ -35,8 +43,8 @@ aishe live          # live voice conversation (press Enter to record)
 ## Install
 
 ```bash
-# 1. Install Python dependency
-pip install requests
+# 1. Install Python dependencies
+pip install requests pyyaml webrtcvad
 
 # 2. Symlink to your PATH
 ln -sf $(pwd)/aishe ~/.local/bin/aishe
@@ -47,27 +55,27 @@ aishe status
 
 ## Usage
 
-### Status
+### Status & Diagnostics
 ```bash
-aishe status
+aishe status        # quick service health
+aishe doctor        # comprehensive diagnostics + roundtrip tests
 ```
-Shows all service health, model counts, memory entries, and thread counts.
 
 ### Chat
 ```bash
-aishe chat "What is 15 * 4?"
-aishe chat "What time is it in Tokyo?" -v   # verbose: shows tool calls
-aishe stream "Tell me a short joke"          # streaming: tokens print live
+aishe chat "What is 15 * 4?"          # one-shot
+aishe chat "What time is it in Tokyo?" -v  # verbose: show tool calls
+aishe stream "Tell me a short joke"    # streaming: tokens print live
+aishe repl                             # continuous text REPL
 ```
 
 ### Live Voice Conversation
 ```bash
 aishe live                    # press Enter to record, speak, get spoken response
-aishe live --list              # list available microphone devices
-aishe live -d 1                # use specific mic device
-aishe live --duration 8        # record 8 seconds per turn
-aishe live --no-tts            # voice input only, text responses
-aishe live -V M1               # use male voice for TTS
+aishe live --list             # list available microphone devices
+aishe live -d 1               # use specific mic device
+aishe live --no-vad           # disable VAD, use fixed duration
+aishe live -V M1              # use male voice for TTS
 ```
 
 ### Memory
@@ -84,6 +92,21 @@ aishe threads                  # list all threads
 aishe threads --new            # create a new thread
 aishe threads --show <id>      # show thread messages
 aishe threads --delete <id>    # delete a thread
+```
+
+### Search & Export
+```bash
+aishe search "project"         # search threads + memory
+aishe export                   # export all data to ~/Downloads/
+aishe export -d ~/Documents    # export to custom directory
+```
+
+### Config
+```bash
+aishe config                   # view full config
+aishe config get voice.default_voice
+aishe config set voice.default_voice M1
+aishe config set voice.recording_duration 8
 ```
 
 ### Voice I/O
@@ -106,6 +129,13 @@ aishe ollama signin
 ```bash
 aishe intent stats --days 7
 aishe intent export
+```
+
+### Shell Completions
+```bash
+aishe completions bash > ~/.bash_completion.d/aishe
+aishe completions zsh > /usr/local/share/zsh/site-functions/_aishe
+aishe completions fish > ~/.config/fish/completions/aishe.fish
 ```
 
 ## Architecture
@@ -137,10 +167,11 @@ All data is local:
 - **Memory**: `~/Library/Application Support/aishe/memory/facts.jsonl`
 - **Threads**: `~/Library/Application Support/aishe/threads/*.json`
 - **Intent Logs**: `~/Library/Application Support/aishe/intent_lab/intent_*.jsonl`
+- **Config**: `~/.config/aishe/config.yaml`
 
 ## Extending
 
-The CLI is a single Python file — easy to fork, modify, and build upon. The architecture is service-oriented: swap in any OpenAI-compatible LLM, any STT/TTS backend, or add new tools to the DeepAgent sidecar.
+The CLI is organized as a Python package (`aishe_pkg/`) — easy to fork, modify, and build upon. The architecture is service-oriented: swap in any OpenAI-compatible LLM, any STT/TTS backend, or add new tools to the DeepAgent sidecar.
 
 ## License
 
