@@ -4,3 +4,12 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+# Sidecar runtime artifacts (venv, downloaded models, logs)
+sidecars/.venv/
+sidecars/__pycache__/
+sidecars/models/
+deepagent/.venv/
+deepagent/__pycache__/
+deepagent/workspace/
+*.log

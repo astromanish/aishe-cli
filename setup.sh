@@ -492,8 +492,110 @@ else
     fi
 fi
 
-# ── 8. Install ffmpeg ───────────────────────────────────────
-echo -e "\n  ${BOLD}8. ffmpeg (for mic recording)${NC}"
+# ── 8. Voice sidecars (STT + TTS) ─────────────────────────────
+# Opt-in: set AISHE_INSTALL_VOICE=1 to auto-install + start STT/TTS
+# Set AISHE_STT_DEVICE=cuda for GPU STT (needs libcublas; otherwise CPU)
+# Set AISHE_STT_MODEL=base|small|medium|large-v3 to choose model size
+
+echo -e "\n  ${BOLD}8. Voice Sidecars (STT + TTS)${NC}"
+
+SIDECAR_DIR="${HOME}/.local/share/aishe-cli/sidecars"
+SIDECAR_VENV="${SIDECAR_DIR}/.venv"
+SIDECAR_MODELS="${SIDECAR_DIR}/models"
+
+install_voice_sidecars() {
+    if [ ! -f "${SIDECAR_VENV}/bin/python" ]; then
+        info "Creating voice sidecar venv..."
+        mkdir -p "${SIDECAR_DIR}"
+        if command -v uv &>/dev/null; then
+            uv venv "${SIDECAR_VENV}" --python 3.11 2>&1 | tail -1
+        else
+            "$PYTHON" -m venv "${SIDECAR_VENV}" 2>&1 | tail -1
+        fi
+        info "Installing STT (faster-whisper) + TTS (kokoro-onnx)..."
+        if command -v uv &>/dev/null; then
+            uv pip install --python "${SIDECAR_VENV}/bin/python" \
+                faster-whisper "kokoro-onnx>=0.5.0" "fastapi>=0.110.0" \
+                "uvicorn[standard]" python-multipart soundfile 2>&1 | tail -2
+        else
+            "${SIDECAR_VENV}/bin/pip" install --quiet \
+                "faster-whisper>=1.0.0" "kokoro-onnx>=0.5.0" \
+                "fastapi>=0.110.0" "uvicorn[standard]" python-multipart soundfile 2>&1 | tail -2
+        fi
+    else
+        pass "Voice sidecar venv already exists at ${SIDECAR_VENV}"
+    fi
+
+    # Download Kokoro TTS model (~325 MB ONNX + 28 MB voices)
+    mkdir -p "${SIDECAR_MODELS}/kokoro"
+    if [ ! -f "${SIDECAR_MODELS}/kokoro/kokoro-v1.0.onnx" ] || \
+       [ ! -f "${SIDECAR_MODELS}/kokoro/voices-v1.0.bin" ]; then
+        info "Downloading Kokoro TTS model (~350 MB, one-time)..."
+        if command -v curl &>/dev/null; then
+            curl -fsSL -o "${SIDECAR_MODELS}/kokoro/kokoro-v1.0.onnx" \
+                "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx" \
+                && pass "Downloaded kokoro onnx" \
+                || warn "Failed to download kokoro onnx"
+            curl -fsSL -o "${SIDECAR_MODELS}/kokoro/voices-v1.0.bin" \
+                "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin" \
+                && pass "Downloaded kokoro voices" \
+                || warn "Failed to download kokoro voices"
+        else
+            warn "curl not found — please download Kokoro models manually to ${SIDECAR_MODELS}/kokoro/"
+        fi
+    else
+        pass "Kokoro TTS model already downloaded"
+    fi
+
+    pass "STT model (faster-whisper) will auto-download on first request"
+}
+
+stt_running() { curl -s --max-time 2 http://localhost:5093/healthz >/dev/null 2>&1; }
+tts_running() { curl -s --max-time 2 http://localhost:8766/health >/dev/null 2>&1; }
+
+if [ "${AISHE_INSTALL_VOICE:-0}" = "1" ]; then
+    install_voice_sidecars
+
+    # Start STT
+    if stt_running; then
+        pass "STT already running on http://localhost:5093"
+    else
+        info "Starting STT (faster-whisper) sidecar..."
+        export AISHE_STT_DEVICE="${AISHE_STT_DEVICE:-cpu}"
+        export AISHE_STT_MODEL="${AISHE_STT_MODEL:-small}"
+        nohup "${SIDECAR_VENV}/bin/python" "${SCRIPT_SRC}/sidecars/stt_server.py" > /tmp/aishe_stt.log 2>&1 &
+        for i in $(seq 1 60); do
+            sleep 1
+            if stt_running; then
+                pass "STT started on http://localhost:5093 (device=${AISHE_STT_DEVICE}, model=${AISHE_STT_MODEL})"
+                break
+            fi
+        done
+        stt_running || warn "STT may not have started. Check: cat /tmp/aishe_stt.log"
+    fi
+
+    # Start TTS
+    if tts_running; then
+        pass "TTS already running on http://localhost:8766"
+    else
+        info "Starting TTS (kokoro-onnx) sidecar..."
+        nohup "${SIDECAR_VENV}/bin/python" "${SCRIPT_SRC}/sidecars/tts_server.py" > /tmp/aishe_tts.log 2>&1 &
+        for i in $(seq 1 30); do
+            sleep 1
+            if tts_running; then
+                pass "TTS started on http://localhost:8766"
+                break
+            fi
+        done
+        tts_running || warn "TTS may not have started. Check: cat /tmp/aishe_tts.log"
+    fi
+else
+    info "Skipping voice sidecars (set AISHE_INSTALL_VOICE=1 to install STT+TTS)"
+    info "Voice services will be DOWN in aishe status until sidecars are running"
+fi
+
+# ── 9. Install ffmpeg ───────────────────────────────────────
+echo -e "\n  ${BOLD}9. ffmpeg (for mic recording)${NC}"
 
 if command -v ffmpeg &>/dev/null; then
     pass "ffmpeg found at $(command -v ffmpeg)"
@@ -525,8 +627,8 @@ else
     esac
 fi
 
-# ── 9. Symlink to PATH ────────────────────────────────────
-echo -e "\n  ${BOLD}9. Install aishe Command${NC}"
+# ── 10. Symlink to PATH ────────────────────────────────────
+echo -e "\n  ${BOLD}10. Install aishe Command${NC}"
 
 case "$OS_NAME" in
     Windows)
@@ -559,8 +661,8 @@ case "$OS_NAME" in
         ;;
 esac
 
-# ── 10. Config directory ───────────────────────────────────
-echo -e "\n  ${BOLD}10. Configuration${NC}"
+# ── 11. Config directory ───────────────────────────────────
+echo -e "\n  ${BOLD}11. Configuration${NC}"
 
 case "$OS_NAME" in
     macOS)
@@ -604,8 +706,8 @@ else
     pass "Config already exists at ${CONFIG_DIR}/config.yaml"
 fi
 
-# ── 11. Data directories ───────────────────────────────────
-echo -e "\n  ${BOLD}11. Data Directories${NC}"
+# ── 12. Data directories ───────────────────────────────────
+echo -e "\n  ${BOLD}12. Data Directories${NC}"
 mkdir -p "${DEFAULT_DATA_DIR}/memory" "${DEFAULT_DATA_DIR}/threads" "${DEFAULT_DATA_DIR}/intent_lab"
 pass "Created data directories at ${DEFAULT_DATA_DIR}"
 
@@ -618,6 +720,8 @@ echo ""
 echo -e "  ${CYAN}Services running:${NC}"
 if ollama_running; then echo -e "     ${GREEN}●${NC} Ollama      ${DIM}http://localhost:11434${NC}"; fi
 if deepagent_running; then echo -e "     ${GREEN}●${NC} DeepAgent   ${DIM}http://localhost:8765${NC}"; fi
+if stt_running 2>/dev/null; then echo -e "     ${GREEN}●${NC} STT (Whisper) ${DIM}http://localhost:5093${NC}"; fi
+if tts_running 2>/dev/null; then echo -e "     ${GREEN}●${NC} TTS (Kokoro)  ${DIM}http://localhost:8766${NC}"; fi
 echo ""
 echo -e "  ${CYAN}Next steps:${NC}"
 echo -e "  1. Run: ${CYAN}aishe status${NC}"
@@ -625,6 +729,10 @@ echo ""
 echo -e "  2. Start chatting: ${CYAN}aishe chat \"Hello!\"${NC}"
 echo -e "     Or go live:      ${CYAN}aishe live${NC}"
 echo ""
-echo -e "  ${DIM}Optional: Install Parakeet STT and Supertonic TTS for voice features.${NC}"
-echo -e "  ${DIM}See: https://github.com/astromanish/aishe-cli${NC}"
+if [ "${AISHE_INSTALL_VOICE:-0}" != "1" ]; then
+echo -e "  ${CYAN}Enable voice (STT+TTS) anytime:${NC}"
+echo -e "     ${CYAN}AISHE_INSTALL_VOICE=1 bash ${SCRIPT_SRC}/setup.sh${NC}"
+echo -e "  ${DIM}This downloads Kokoro TTS (~350 MB) + faster-whisper STT.${NC}"
+echo -e "  ${DIM}After that: aishe voice speak 'hello' and aishe voice transcribe <file> work.${NC}"
 echo ""
+fi
