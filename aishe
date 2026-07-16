@@ -1,0 +1,825 @@
+#!/usr/bin/env python3
+"""Aishe CLI — command-line interface for all Aishe Tauri app features.
+
+Hits the same HTTP endpoints the desktop app uses:
+  - DeepAgent  :8765  (chat, stream)
+  - Ollama     :11434 (models)
+  - Parakeet   :5093  (STT)
+  - Supertonic :8766  (TTS)
+  - File-based memory & threads at ~/Library/Application Support/aishe/
+
+Usage:
+  aishe status                 — check all services
+  aishe chat "hello"           — one-shot chat (DeepAgent)
+  aishe stream "hello"         — streaming chat (tokens printed live)
+  aishe live                   — live voice conversation (press Enter to record)
+  aishe live --list            — list mic devices
+  aishe threads                — list all chat threads
+  aishe threads --new          — create a new thread
+  aishe threads --delete <id>  — delete a thread
+  aishe threads --show <id>    — show thread messages
+  aishe memory add "fact"      — add a memory
+  aishe memory search "query"  — search memories
+  aishe memory list            — list all memories
+  aishe memory clear           — clear all memories
+  aishe voice transcribe <wav> — transcribe audio file
+  aishe voice speak "text"     — synthesize speech + play
+  aishe voice speak "text" -o out.wav  — synthesize, save only
+  aishe voice status           — check STT/TTS services
+  aishe ollama models          — list pulled models
+  aishe ollama pull <model>   — pull a model
+  aishe ollama whoami          — check ollama login
+  aishe intent stats [--days N]— intent lab stats
+  aishe intent export          — export intent log as CSV
+
+Requirements: Python 3.12+, requests (pip install requests)
+"""
+
+import argparse
+import json
+import os
+import sys
+import subprocess
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+try:
+    import requests
+except ImportError:
+    print("Error: 'requests' not installed. Run: pip install requests")
+    sys.exit(1)
+
+# ─── Config ────────────────────────────────────────────────────────────────
+
+DEEPAGENT = "http://localhost:8765"
+OLLAMA    = "http://localhost:11434"
+STT       = "http://localhost:5093"
+TTS       = "http://localhost:8766"
+
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/Library/Application Support"))) / "aishe"
+THREADS_DIR = DATA_DIR / "threads"
+MEMORY_DIR  = DATA_DIR / "memory"
+MEMORY_FILE = MEMORY_DIR / "facts.jsonl"
+INTENT_DIR  = DATA_DIR / "intent_lab"
+
+# ─── Helpers ───────────────────────────────────────────────────────────────
+
+def ensure_dirs():
+    THREADS_DIR.mkdir(parents=True, exist_ok=True)
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+def now_rfc3339():
+    return datetime.now().isoformat()
+
+def green(s):  return f"\033[32m{s}\033[0m"
+def red(s):    return f"\033[31m{s}\033[0m"
+def yellow(s): return f"\033[33m{s}\033[0m"
+def cyan(s):   return f"\033[36m{s}\033[0m"
+def bold(s):   return f"\033[1m{s}\033[0m"
+def dim(s):    return f"\033[2m{s}\033[0m"
+
+def check(url, timeout=3):
+    try:
+        r = requests.get(url, timeout=timeout)
+        return r.status_code < 300
+    except:
+        return False
+
+# ─── Status ────────────────────────────────────────────────────────────────
+
+def cmd_status(args):
+    services = [
+        ("Ollama",      f"{OLLAMA}/api/tags"),
+        ("DeepAgent",   f"{DEEPAGENT}/health"),
+        ("Parakeet STT",f"{STT}/healthz"),
+        ("Supertonic",  f"{TTS}/health"),
+        ("Memory",      str(MEMORY_FILE)),
+        ("Threads",     str(THREADS_DIR)),
+    ]
+    print(bold("Aishe Service Status"))
+    print("─" * 50)
+    for name, url in services:
+        if url.startswith("http"):
+            up = check(url)
+            extra = ""
+            if name == "Ollama" and up:
+                try:
+                    r = requests.get(f"{OLLAMA}/api/tags", timeout=3)
+                    models = r.json().get("models", [])
+                    extra = f" ({len(models)} models)"
+                except: pass
+            elif name == "Supertonic" and up:
+                try:
+                    r = requests.get(f"{TTS}/health", timeout=3)
+                    j = r.json()
+                    extra = f" (loaded={j.get('model_loaded', '?')})"
+                except: pass
+        else:
+            up = Path(url).exists() or url.strip()
+            extra = ""
+        status = green("✓ UP") if up else red("✗ DOWN")
+        print(f"  {name:16s} {status} {dim(extra)}")
+
+    # Memory count
+    if MEMORY_FILE.exists():
+        count = sum(1 for line in MEMORY_FILE.read_text().splitlines() if line.strip())
+        print(f"  {dim(f'Memory entries: {count}')}")
+    # Threads count
+    if THREADS_DIR.exists():
+        count = len(list(THREADS_DIR.glob("*.json")))
+        print(f"  {dim(f'Threads: {count}')}")
+
+# ─── Chat ───────────────────────────────────────────────────────────────────
+
+def cmd_chat(args):
+    msg = " ".join(args.message) if isinstance(args.message, list) else args.message
+    if not msg:
+        msg = sys.stdin.read().strip()
+    if not msg:
+        print(red("No message provided")); sys.exit(1)
+
+    tid = args.thread or "cli"
+    try:
+        r = requests.post(f"{DEEPAGENT}/invoke", json={"message": msg, "thread_id": tid}, timeout=120)
+        r.raise_for_status()
+        data = r.json()
+    except requests.exceptions.ConnectionError:
+        print(red("Cannot reach DeepAgent on :8765. Start it first:")); print(f"  cd aishe-tauri/deepagent && .venv/bin/python server.py")
+        sys.exit(1)
+    except Exception as e:
+        print(red(f"Error: {e}")); sys.exit(1)
+
+    print(data.get("answer", ""))
+    if args.verbose:
+        print(dim(f"\n─ stats: {data.get('steps', '?')} steps, {len(data.get('tool_calls', []))} tool calls"))
+        for tc in data.get("tool_calls", []):
+            print(dim(f"  tool: {tc['name']}({json.dumps(tc['args'], ensure_ascii=False)})"))
+
+def cmd_stream(args):
+    msg = " ".join(args.message) if isinstance(args.message, list) else args.message
+    if not msg:
+        msg = sys.stdin.read().strip()
+    if not msg:
+        print(red("No message provided")); sys.exit(1)
+
+    tid = args.thread or "cli"
+    try:
+        r = requests.post(f"{DEEPAGENT}/stream", json={"message": msg, "thread_id": tid}, stream=True, timeout=120)
+        r.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        print(red("Cannot reach DeepAgent on :8765.")); sys.exit(1)
+
+    answer = ""
+    for line in r.iter_lines():
+        if not line: continue
+        try:
+            ev = json.loads(line)
+        except: continue
+        etype = ev.get("event", "")
+        if etype == "token":
+            tok = ev.get("content", "")
+            print(tok, end="", flush=True)
+            answer += tok
+        elif etype == "tool_call":
+            print(yellow(f"\n  [tool: {ev.get('name', '?')}]"), flush=True)
+        elif etype == "tool_result":
+            print(dim(f"  [result: {ev.get('result', '')[:100]}]"), flush=True)
+        elif etype == "final":
+            if not answer:
+                answer = ev.get("answer", "")
+    if not answer:
+        print(dim("(empty response)"))
+    print()  # final newline
+
+# ─── Threads ───────────────────────────────────────────────────────────────
+
+def cmd_threads(args):
+    ensure_dirs()
+    if args.new:
+        thread = {
+            "id": f"thr_{uuid.uuid4().hex}",
+            "title": "CLI Chat",
+            "created_at": now_rfc3339(),
+            "updated_at": now_rfc3339(),
+            "messages": [],
+        }
+        path = THREADS_DIR / f"{thread['id']}.json"
+        path.write_text(json.dumps(thread, indent=2))
+        print(f"{green('Created')} {thread['id']}")
+        return
+
+    if args.delete:
+        path = THREADS_DIR / f"{args.delete}.json"
+        if path.exists():
+            path.unlink()
+            print(f"{red('Deleted')} {args.delete}")
+        else:
+            print(red(f"Thread {args.delete} not found"))
+        return
+
+    if args.show:
+        path = THREADS_DIR / f"{args.show}.json"
+        if not path.exists():
+            print(red(f"Thread {args.show} not found")); sys.exit(1)
+        thread = json.loads(path.read_text())
+        print(bold(f"Thread: {thread['title']}"))
+        print(dim(f"ID: {thread['id']}  Created: {thread['created_at']}"))
+        print("─" * 50)
+        for msg in thread["messages"]:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "user":
+                print(cyan(f"You: {content}"))
+            else:
+                print(f"Aishe: {content}")
+            print()
+        return
+
+    threads = []
+    for f in THREADS_DIR.glob("*.json"):
+        try:
+            t = json.loads(f.read_text())
+            threads.append(t)
+        except: pass
+    threads.sort(key=lambda t: t.get("updated_at", ""), reverse=True)
+
+    if not threads:
+        print(dim("No threads yet. Create one with: aishe threads --new"))
+        return
+
+    print(bold(f"Threads ({len(threads)})"))
+    print("─" * 60)
+    for t in threads:
+        n_msgs = len(t.get("messages", []))
+        title = t.get("title", "untitled")
+        print(f"  {t['id']:40s} {title:20s} {dim(f'{n_msgs} msgs')}")
+
+# ─── Memory ─────────────────────────────────────────────────────────────────
+
+def cmd_memory(args):
+    ensure_dirs()
+
+    if args.action == "add":
+        fact = " ".join(args.value) if isinstance(args.value, list) else args.value
+        if not fact:
+            fact = sys.stdin.read().strip()
+        if not fact:
+            print(red("No fact provided")); sys.exit(1)
+        entry = {
+            "id": f"mem_{uuid.uuid4().hex}",
+            "fact": fact,
+            "timestamp": now_rfc3339(),
+        }
+        with open(MEMORY_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        print(f"{green('Added')} {entry['id']}: {fact}")
+        return
+
+    if args.action == "search":
+        query = " ".join(args.value) if isinstance(args.value, list) else args.value
+        if not query:
+            print(red("No query provided")); sys.exit(1)
+        if not MEMORY_FILE.exists():
+            print(dim("No memories stored.")); return
+        ql = query.lower()
+        results = []
+        for line in MEMORY_FILE.read_text().splitlines():
+            if not line.strip(): continue
+            try:
+                entry = json.loads(line)
+            except: continue
+            if entry["fact"].lower().find(ql) >= 0:
+                results.append(entry)
+        if results:
+            print(bold(f"Found {len(results)} match(es):"))
+            for r in results:
+                print(f"  {cyan(r['id'])}  {r['fact']}")
+                print(f"  {dim(r['timestamp'])}")
+        else:
+            print(dim("No matches found."))
+        return
+
+    if args.action == "list":
+        if not MEMORY_FILE.exists():
+            print(dim("No memories stored.")); return
+        entries = []
+        for line in MEMORY_FILE.read_text().splitlines():
+            if line.strip():
+                try: entries.append(json.loads(line))
+                except: pass
+        if not entries:
+            print(dim("No memories stored.")); return
+        print(bold(f"Memories ({len(entries)})"))
+        print("─" * 60)
+        for e in entries:
+            print(f"  {cyan(e['id'])}  {e['fact']}")
+            print(f"  {dim(e['timestamp'])}")
+        return
+
+    if args.action == "clear":
+        if MEMORY_FILE.exists():
+            count = sum(1 for l in MEMORY_FILE.read_text().splitlines() if l.strip())
+            MEMORY_FILE.unlink()
+            print(f"{red('Cleared')} {count} memories")
+        else:
+            print(dim("Nothing to clear"))
+        return
+
+# ─── Voice ─────────────────────────────────────────────────────────────────
+
+def cmd_voice(args):
+    if args.action == "status":
+        stt = check(f"{STT}/healthz")
+        tts_ok = check(f"{TTS}/health")
+        print(bold("Voice Services"))
+        print(f"  Parakeet STT  :5093  {green('✓ UP') if stt else red('✗ DOWN')}")
+        print(f"  Supertonic TTS :8766  {green('✓ UP') if tts_ok else red('✗ DOWN')}")
+        return
+
+    if args.action == "transcribe":
+        path = args.file
+        if not path or not os.path.exists(path):
+            print(red(f"Audio file not found: {path}")); sys.exit(1)
+        try:
+            with open(path, "rb") as f:
+                resp = requests.post(
+                    f"{STT}/v1/audio/transcriptions",
+                    files={"file": (os.path.basename(path), f, "audio/wav")},
+                    data={"model": "parakeet-tdt-0.6b-v3"},
+                    timeout=30,
+                )
+            resp.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            print(red("Cannot reach Parakeet STT on :5093")); sys.exit(1)
+        text = resp.json().get("text", "")
+        print(text)
+        return
+
+    if args.action == "speak":
+        # Merge file (positional, may eat first word) + text (rest of words)
+        parts = []
+        if args.file:
+            parts.append(args.file)
+        if args.text:
+            parts.extend(args.text)
+        text = " ".join(parts)
+        if not text:
+            text = sys.stdin.read().strip()
+        if not text:
+            print(red("No text provided")); sys.exit(1)
+        voice = args.voice or "F4"
+        try:
+            resp = requests.post(
+                f"{TTS}/v1/audio/speech",
+                json={"input": text, "voice": voice, "model": "supertonic-3", "response_format": "wav"},
+                timeout=60,
+            )
+            resp.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            print(red("Cannot reach Supertonic TTS on :8766")); sys.exit(1)
+        if args.output:
+            outpath = args.output
+        else:
+            outpath = f"/tmp/aishe_tts_{uuid.uuid4().hex[:8]}.wav"
+        with open(outpath, "wb") as f:
+            f.write(resp.content)
+        print(f"{green('Synthesized')} {len(resp.content)} bytes → {outpath}")
+        if not args.no_play:
+            print(dim("Playing..."))
+            subprocess.run(["afplay", outpath])
+        return
+
+# ─── Ollama ─────────────────────────────────────────────────────────────────
+
+def cmd_ollama(args):
+    if args.action == "models":
+        try:
+            r = requests.get(f"{OLLAMA}/api/tags", timeout=5)
+            r.raise_for_status()
+            models = r.json().get("models", [])
+        except: print(red("Ollama not reachable on :11434")); sys.exit(1)
+        if not models:
+            print(dim("No models pulled. Use: aishe ollama pull <model>")); return
+        print(bold(f"Ollama Models ({len(models)})"))
+        print("─" * 60)
+        for m in models:
+            size_mb = m.get("size", 0) / 1024 / 1024
+            print(f"  {m['name']:40s} {dim(f'{size_mb:.0f} MB')}")
+        return
+
+    if args.action == "pull":
+        model = args.model
+        if not model:
+            print(red("Specify model: aishe ollama pull <model>")); sys.exit(1)
+        print(f"Pulling {model}...")
+        result = subprocess.run(["ollama", "pull", model])
+        if result.returncode == 0:
+            print(f"{green('Pulled')} {model}")
+        else:
+            print(red(f"Failed to pull {model}"))
+        return
+
+    if args.action == "whoami":
+        result = subprocess.run(["ollama", "whoami"], capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            print(f"Logged in as: {green(result.stdout.strip())}")
+        else:
+            print(red("Not logged in to Ollama"))
+        return
+
+    if args.action == "signin":
+        import webbrowser
+        webbrowser.open("https://ollama.com/login")
+        print("Opening browser for Ollama login...")
+        return
+
+# ─── Intent Lab ─────────────────────────────────────────────────────────────
+
+def cmd_intent(args):
+    if args.action == "stats":
+        days = args.days or 7
+        if not INTENT_DIR.exists():
+            print(dim("No intent logs found.")); return
+        now = datetime.now()
+        total = 0
+        by_intent = {}
+        correct = 0
+        misclassified = 0
+        for f in INTENT_DIR.glob("intent_*.jsonl"):
+            name = f.stem  # intent_YYYY-MM-DD
+            date_str = name.replace("intent_", "")
+            try:
+                from datetime import date
+                d = date.fromisoformat(date_str)
+                days_ago = (now.date() - d).days
+                if days_ago >= days: continue
+            except: pass
+            for line in f.read_text().splitlines():
+                if not line.strip(): continue
+                try:
+                    e = json.loads(line)
+                except: continue
+                total += 1
+                by_intent[e["intent"]] = by_intent.get(e["intent"], 0) + 1
+                if e.get("feedback") is True: correct += 1
+                elif e.get("feedback") is False: misclassified += 1
+        accuracy = (correct / total * 100) if total > 0 else 0
+        print(bold(f"Intent Stats (last {days} days)"))
+        print("─" * 40)
+        print(f"  Total:          {total}")
+        print(f"  Accuracy:       {accuracy:.1f}%")
+        print(f"  Misclassified:  {misclassified}")
+        if by_intent:
+            print(f"\n  {bold('By intent:')}")
+            for intent, count in sorted(by_intent.items(), key=lambda x: -x[1]):
+                bar = "█" * min(count, 30)
+                print(f"    {intent:20s} {count:4d} {cyan(bar)}")
+        return
+
+    if args.action == "export":
+        if not INTENT_DIR.exists():
+            print(dim("No intent logs found.")); return
+        outpath = os.path.expanduser(f"~/Downloads/intent_export_{datetime.now().strftime('%Y-%m-%d')}.csv")
+        import csv
+        with open(outpath, "w", newline="") as csvfile:
+            w = csv.writer(csvfile)
+            w.writerow(["id", "timestamp", "raw_text", "language", "intent", "confidence", "tool_used", "feedback"])
+            for f in INTENT_DIR.glob("intent_*.jsonl"):
+                for line in f.read_text().splitlines():
+                    if not line.strip(): continue
+                    try: e = json.loads(line)
+                    except: continue
+                    w.writerow([
+                        e["id"], e["timestamp"], e["raw_text"], e["language"],
+                        e["intent"], e["confidence"],
+                        e.get("tool_used", ""),
+                        "correct" if e.get("feedback") is True else "wrong" if e.get("feedback") is False else "",
+                    ])
+        print(f"{green('Exported')} → {outpath}")
+        return
+
+# ─── Live Voice I/O ─────────────────────────────────────────────────────────
+
+def list_mic_devices():
+    """List available AVFoundation audio input devices."""
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+            capture_output=True, text=True, timeout=5,
+        )
+        devices = []
+        in_audio = False
+        for line in (r.stdout + r.stderr).splitlines():
+            if "AVFoundation audio devices:" in line:
+                in_audio = True
+                continue
+            if in_audio and "[AVFoundation" in line and "audio" in line.lower():
+                continue
+            if in_audio and line.strip().startswith("["):
+                import re
+                m = re.search(r'\[(\d+)\]\s*(.+)', line.strip())
+                if m:
+                    devices.append((int(m.group(1)), m.group(2).strip()))
+        return devices
+    except:
+        return []
+
+def record_audio(duration, device_index, outpath):
+    """Record audio from mic using ffmpeg."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "avfoundation",
+        "-i", f":{device_index}",
+        "-t", str(duration),
+        "-ar", "16000",
+        "-ac", "1",
+        outpath,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 5)
+    return r.returncode == 0
+
+def transcribe_file(filepath):
+    """Transcribe a wav file via Parakeet STT."""
+    with open(filepath, "rb") as f:
+        resp = requests.post(
+            f"{STT}/v1/audio/transcriptions",
+            files={"file": (os.path.basename(filepath), f, "audio/wav")},
+            data={"model": "parakeet-tdt-0.6b-v3"},
+            timeout=30,
+        )
+    resp.raise_for_status()
+    return resp.json().get("text", "").strip()
+
+def synthesize_speak(text, voice="F4", play=True):
+    """Synthesize speech via Supertonic TTS and optionally play it."""
+    resp = requests.post(
+        f"{TTS}/v1/audio/speech",
+        json={"input": text, "voice": voice, "model": "supertonic-3", "response_format": "wav"},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    outpath = f"/tmp/aishe_live_{uuid.uuid4().hex[:8]}.wav"
+    with open(outpath, "wb") as f:
+        f.write(resp.content)
+    if play:
+        subprocess.run(["afplay", outpath], capture_output=True)
+        os.unlink(outpath)
+    return outpath
+
+def cmd_live(args):
+    """Live voice conversation: record → STT → DeepAgent (streaming) → TTS → play, in a loop."""
+    import threading
+    import signal as sig_mod
+    import time
+
+    # Check services
+    if not check(f"{STT}/healthz"):
+        print(red("Parakeet STT is down on :5093")); sys.exit(1)
+    if not check(f"{TTS}/health"):
+        print(red("Supertonic TTS is down on :8766")); sys.exit(1)
+    if not check(f"{DEEPAGENT}/health"):
+        print(red("DeepAgent is down on :8765")); sys.exit(1)
+
+    # Find mic device
+    devices = list_mic_devices()
+    if not devices:
+        print(red("No microphone devices found")); sys.exit(1)
+
+    # Auto-select or use specified device
+    device_idx = args.device
+    if device_idx is None:
+        for idx, name in devices:
+            if "macbook" in name.lower() or "built-in" in name.lower() or "microphone" in name.lower():
+                device_idx = idx
+                break
+        if device_idx is None:
+            device_idx = devices[0][0]
+
+    # Print available devices
+    print(bold("🎤 Live Voice Mode"))
+    print(f"  Mic: {cyan(f'[{device_idx}]')} {dict(devices).get(device_idx, '?')}")
+    print(f"  STT: {green('Parakeet :5093')}  TTS: {green('Supertonic :8766')}  LLM: {green('DeepAgent :8765')}")
+    print(f"  Voice: {cyan(args.voice)}  Duration: {args.duration}s  Thread: {args.thread}")
+    print()
+    print(dim("Press Enter to record, Ctrl+C to exit."))
+    print(dim("Or type a message and press Enter to chat without voice."))
+    print("─" * 50)
+
+    tid = args.thread or "live"
+    consecutive_errors = 0
+
+    while True:
+        try:
+            user_input = input(bold("\nYou ▶ ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{dim('Goodbye!')}")
+            break
+
+        if not user_input:
+            # Record from mic
+            print(dim(f"  🔴 Recording {args.duration}s..."), end="", flush=True)
+            recpath = f"/tmp/aishe_live_rec_{uuid.uuid4().hex[:8]}.wav"
+            ok = record_audio(args.duration, device_idx, recpath)
+            if not ok:
+                print(f"\r  {red('Recording failed')}                    ")
+                continue
+
+            print(f"\r  {green('● Recorded')} → transcribing...", end="", flush=True)
+            try:
+                user_text = transcribe_file(recpath)
+            except Exception as e:
+                print(f"\r  {red(f'STT error: {e}')}                    ")
+                os.unlink(recpath)
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    print(red("Too many STT errors. Check Parakeet server."))
+                    break
+                continue
+            finally:
+                if os.path.exists(recpath):
+                    os.unlink(recpath)
+
+            if not user_text:
+                print(f"\r  {yellow('(empty transcription)')}                    ")
+                continue
+
+            print(f"\r  {cyan('You said:')} {user_text}                    ")
+            consecutive_errors = 0
+        else:
+            user_text = user_input
+
+        # ── Stream from DeepAgent with full tool visibility ──
+        print()
+        try:
+            r = requests.post(
+                f"{DEEPAGENT}/stream",
+                json={"message": user_text, "thread_id": tid},
+                stream=True,
+                timeout=120,
+            )
+            r.raise_for_status()
+        except Exception as e:
+            print(f"  {red(f'DeepAgent error: {e}')}")
+            continue
+
+        answer = ""
+        tool_calls = []
+        current_tool = None
+
+        for line in r.iter_lines():
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except:
+                continue
+
+            etype = ev.get("event", "")
+
+            if etype == "tool_call":
+                name = ev.get("name", "?")
+                args_str = json.dumps(ev.get("args", {}), ensure_ascii=False)
+                current_tool = name
+                tool_calls.append(name)
+                print(f"  {yellow('⚡ tool_call')} {cyan(name)}({args_str})")
+
+            elif etype == "tool_result":
+                result = ev.get("result", "")
+                result_short = result[:200] + ("..." if len(result) > 200 else "")
+                print(f"  {dim('   └─ result:')} {result_short}")
+
+            elif etype == "token":
+                tok = ev.get("content", "")
+                if tok:
+                    print(tok, end="", flush=True)
+                    answer += tok
+
+            elif etype == "final":
+                if not answer:
+                    answer = ev.get("answer", "")
+
+        if answer:
+            print()
+
+        if tool_calls:
+            print(f"  {dim(f'└─ tools used: {", ".join(tool_calls)}')}")
+
+        # TTS
+        if not args.no_tts and answer.strip():
+            print(f"  {dim('🔊 Speaking...')}", end="", flush=True)
+            try:
+                synthesize_speak(answer, voice=args.voice, play=True)
+                print(f"\r  {green('🔊 Spoken')}                    ")
+            except Exception as e:
+                print(f"\r  {yellow(f'TTS failed: {e}')}                    ")
+
+# ─── Main ──────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="aishe",
+        description="Aishe CLI — voice-first AI for Bharat",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  aishe status
+  aishe chat "What is 2+2?"
+  aishe stream "Tell me a joke"
+  aishe live                    — live voice conversation (press Enter to record)
+  aishe live --list              — list mic devices
+  aishe live -d 2 --duration 8  — use mic [2], record 8s per turn
+  aishe live --no-tts           — voice input only, text responses
+  aishe threads --new
+  aishe memory add "User prefers Hindi"
+  aishe memory search "Hindi"
+  aishe voice transcribe recording.wav
+  aishe voice speak "Namaste, main Aishe hoon"
+  aishe ollama models
+""",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # status
+    sub.add_parser("status", help="Check all service statuses")
+
+    # chat
+    p_chat = sub.add_parser("chat", help="One-shot chat via DeepAgent")
+    p_chat.add_argument("message", nargs="*", help="Message to send (or pipe via stdin)")
+    p_chat.add_argument("-t", "--thread", default="cli", help="Thread ID")
+    p_chat.add_argument("-v", "--verbose", action="store_true", help="Show tool calls")
+
+    # stream
+    p_stream = sub.add_parser("stream", help="Streaming chat (tokens printed live)")
+    p_stream.add_argument("message", nargs="*", help="Message to send (or pipe via stdin)")
+    p_stream.add_argument("-t", "--thread", default="cli", help="Thread ID")
+
+    # threads
+    p_threads = sub.add_parser("threads", help="Manage chat threads")
+    p_threads.add_argument("--new", action="store_true", help="Create a new thread")
+    p_threads.add_argument("--delete", metavar="ID", help="Delete a thread")
+    p_threads.add_argument("--show", metavar="ID", help="Show thread messages")
+
+    # memory
+    p_mem = sub.add_parser("memory", help="Memory management")
+    p_mem.add_argument("action", choices=["add", "search", "list", "clear"], help="Memory action")
+    p_mem.add_argument("value", nargs="*", help="Fact text or search query")
+
+    # voice
+    p_voice = sub.add_parser("voice", help="Voice input/output")
+    p_voice.add_argument("action", choices=["transcribe", "speak", "status"], help="Voice action")
+    p_voice.add_argument("file", nargs="?", help="Audio file path (for transcribe)")
+    p_voice.add_argument("text", nargs="*", help="Text to synthesize (for speak)")
+    p_voice.add_argument("--voice", "-V", default="F4", help="Voice (F1-F5, M1-M5)")
+    p_voice.add_argument("--output", "-o", help="Save audio to file (no auto-play)")
+    p_voice.add_argument("--no-play", action="store_true", help="Don't auto-play audio")
+
+    # ollama
+    p_ollama = sub.add_parser("ollama", help="Ollama model management")
+    p_ollama.add_argument("action", choices=["models", "pull", "whoami", "signin"], help="Ollama action")
+    p_ollama.add_argument("model", nargs="?", help="Model name (for pull)")
+
+    # intent
+    p_intent = sub.add_parser("intent", help="Intent lab")
+    p_intent.add_argument("action", choices=["stats", "export"], help="Intent action")
+    p_intent.add_argument("--days", type=int, default=7, help="Days to include")
+
+    # live
+    p_live = sub.add_parser("live", help="Live voice conversation (record → STT → think → TTS)")
+    p_live.add_argument("-d", "--device", type=int, default=None, help="Mic device index (use 'aishe live --list' to see)")
+    p_live.add_argument("--duration", type=int, default=5, help="Recording duration in seconds")
+    p_live.add_argument("-t", "--thread", default="live", help="Thread ID for conversation memory")
+    p_live.add_argument("-V", "--voice", default="F4", help="TTS voice (F1-F5, M1-M5)")
+    p_live.add_argument("--no-tts", action="store_true", help="Don't speak responses")
+    p_live.add_argument("--list", action="store_true", help="List mic devices and exit")
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    dispatch = {
+        "status": cmd_status,
+        "chat": cmd_chat,
+        "stream": cmd_stream,
+        "threads": cmd_threads,
+        "memory": cmd_memory,
+        "voice": cmd_voice,
+        "ollama": cmd_ollama,
+        "intent": cmd_intent,
+        "live": cmd_live,
+    }
+    if args.command == "live" and hasattr(args, "list") and args.list:
+        devices = list_mic_devices()
+        if devices:
+            print(bold("Available microphone devices:"))
+            for idx, name in devices:
+                print(f"  [{idx}] {name}")
+            print(dim("\nUse: aishe live -d <index>"))
+        else:
+            print(red("No microphone devices found"))
+        sys.exit(0)
+    dispatch[args.command](args)
+
+if __name__ == "__main__":
+    main()
