@@ -20,7 +20,11 @@ from .config import cmd_config, get, get_config_path, load
 from .memory import cmd_memory, count as mem_count, export_csv as mem_export_csv, export_markdown as mem_export_md, list_all as mem_list, search as mem_search
 from .ollama import cmd_ollama, health as ollama_health
 from .threads import cmd_threads, count as thr_count, export_markdown as thr_export_md, list_all as thr_list, search as thr_search
-from .util import Spinner, bold, check, cyan, dim, green, red, yellow
+from .util import (
+    Spinner, bold, check, cyan, dim, green, red, yellow,
+    header, section, bullet, status_dot, key_value, divider,
+    welcome, prompt_text, assistant_prefix,
+)
 from .voice import (
     cmd_voice,
     list_mic_devices,
@@ -347,18 +351,17 @@ def cmd_live(args: Any) -> None:
 
 def cmd_doctor(args: Any) -> None:
     """Comprehensive diagnostics — check all services, test roundtrips."""
-    print(bold("🔍 Aishe Diagnostics"))
-    print("─" * 50)
+    header("Aishe Diagnostics", "Comprehensive system check")
 
     # 1. Python environment
-    print(bold("\n1. Environment"))
-    print(f"   Python:    {sys.version.split()[0]}")
-    print(f"   Platform:  {sys.platform}")
-    print(f"   Version:   {__version__}")
-    print(f"   Config:    {get_config_path()}")
+    section("Environment")
+    print(f"  {key_value('Python', sys.version.split()[0])}")
+    print(f"  {key_value('Platform', sys.platform)}")
+    print(f"  {key_value('Version', __version__)}")
+    print(f"  {key_value('Config', str(get_config_path()))}")
 
     # 2. Dependencies
-    print(bold("\n2. Dependencies"))
+    section("Dependencies")
     deps = {
         "requests": False,
         "yaml (PyYAML)": False,
@@ -381,16 +384,16 @@ def cmd_doctor(args: Any) -> None:
         pass
 
     for dep, ok in deps.items():
-        print(f"   {dep:20s} {green('✓') if ok else red('✗')}")
+        print(f"  {status_dot(ok)} {dep:20s} {green('installed') if ok else red('missing')}")
 
     # 3. External tools
-    print(bold("\n3. External Tools"))
+    section("External Tools")
     for tool in ["ffmpeg", "afplay", "ollama"]:
         which = shutil.which(tool)
-        print(f"   {tool:20s} {green(which) if which else red('not found')}")
+        print(f"  {status_dot(which is not None)} {tool:20s} {green(which) if which else red('not found')}")
 
     # 4. Services
-    print(bold("\n4. Services"))
+    section("Services")
     services = [
         ("DeepAgent", get("services.deepagent", ":8765"), "/health"),
         ("Ollama", get("services.ollama", ":11434"), "/api/tags"),
@@ -410,19 +413,18 @@ def cmd_doctor(args: Any) -> None:
                 pass
         elif ok and name == "Supertonic TTS":
             extra = f" ({tts_info()})"
-        print(f"   {name:20s} {green('✓ UP') if ok else red('✗ DOWN')}{dim(extra)}")
+        print(f"  {status_dot(ok)} {name:20s} {green('UP') if ok else red('DOWN')}{dim(extra)}")
 
     # 5. Data
-    print(bold("\n5. Data"))
+    section("Data")
     mem_cnt = mem_count()
     thr_cnt = thr_count()
-    print(f"   Memory entries:  {mem_cnt}")
-    print(f"   Threads:         {thr_cnt}")
+    print(f"  {bullet('Memory entries')} {cyan(str(mem_cnt))}")
+    print(f"  {bullet('Threads')} {cyan(str(thr_cnt))}")
 
     # 6. STT roundtrip test
-    print(bold("\n6. STT Roundtrip"))
+    section("STT Roundtrip")
     if stt_health():
-        # Generate a short test tone, transcribe it
         test_wav = "/tmp/aishe_test_stt.wav"
         subprocess.run(
             ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5",
@@ -431,33 +433,34 @@ def cmd_doctor(args: Any) -> None:
         )
         try:
             text = transcribe(test_wav)
-            print(f"   {green('✓ STT responds')} (got: '{text[:60]}')")
+            preview = text[:60]
+            print(f"  {status_dot(True)} {green('STT responds')} {dim('(got: ' + repr(preview) + ')')}")
         except Exception as e:
-            print(f"   {red(f'✗ STT error: {e}')}")
+            print(f"  {status_dot(False)} {red(f'STT error: {e}')}")
         finally:
             if os.path.exists(test_wav):
                 os.unlink(test_wav)
     else:
-        print(f"   {yellow('⚠ Skipped (STT down)')}")
+        print(f"  {yellow('⚠ Skipped (STT down)')}")
 
     # 7. TTS roundtrip test
-    print(bold("\n7. TTS Roundtrip"))
+    section("TTS Roundtrip")
     if tts_health():
         try:
             out = synthesize("test", play=False)
             if out and os.path.exists(out):
                 size = os.path.getsize(out)
                 os.unlink(out)
-                print(f"   {green(f'✓ TTS responds')} ({size} bytes)")
+                print(f"  {status_dot(True)} {green('TTS responds')} {dim(f'({size} bytes)')}")
             else:
-                print(f"   {green('✓ TTS responds')}")
+                print(f"  {status_dot(True)} {green('TTS responds')}")
         except Exception as e:
-            print(f"   {red(f'✗ TTS error: {e}')}")
+            print(f"  {status_dot(False)} {red(f'TTS error: {e}')}")
     else:
-        print(f"   {yellow('⚠ Skipped (TTS down)')}")
+        print(f"  {yellow('⚠ Skipped (TTS down)')}")
 
     # 8. DeepAgent roundtrip
-    print(bold("\n8. DeepAgent Roundtrip"))
+    section("DeepAgent Roundtrip")
     if check(f"{DEEPAGENT_URL}/health"):
         try:
             r = requests.post(
@@ -467,14 +470,15 @@ def cmd_doctor(args: Any) -> None:
             )
             r.raise_for_status()
             answer = r.json().get("answer", "")
-            print(f"   {green('✓ DeepAgent responds')} (answer: '{answer[:60]}')")
+            preview = answer[:60]
+            print(f"  {status_dot(True)} {green('DeepAgent responds')} {dim('(answer: ' + repr(preview) + ')')}")
         except Exception as e:
-            print(f"   {red(f'✗ DeepAgent error: {e}')}")
+            print(f"  {status_dot(False)} {red(f'DeepAgent error: {e}')}")
     else:
-        print(f"   {yellow('⚠ Skipped (DeepAgent down)')}")
+        print(f"  {yellow('⚠ Skipped (DeepAgent down)')}")
 
     print()
-    print(green("✓ Diagnostics complete"))
+    print(f"  {green(bold('✓ Diagnostics complete'))}")
 
 
 # ─── Search ─────────────────────────────────────────────────────────────────
@@ -939,37 +943,35 @@ def main() -> None:
 
 def cmd_status(args: Any = None) -> None:
     """Check all service statuses."""
+    header("Aishe Service Status")
+
     services = [
         ("Ollama", get("services.ollama", "http://localhost:11434"), "/api/tags"),
         ("DeepAgent", get("services.deepagent", "http://localhost:8765"), "/health"),
         ("Parakeet STT", get("services.stt", "http://localhost:5093"), "/healthz"),
         ("Supertonic TTS", get("services.tts", "http://localhost:8766"), "/health"),
-        ("Memory", str(Path(get("data.dir", "")) / "memory" / "facts.jsonl"), ""),
-        ("Threads", str(Path(get("data.dir", "")) / "threads"), ""),
     ]
-    print(bold("Aishe Service Status"))
-    print("─" * 50)
-    for name, url, endpoint in services:
-        if endpoint:
-            full_url = f"{url}{endpoint}"
-            up = check(full_url)
-            extra = ""
-            if name == "Ollama" and up:
-                try:
-                    r = requests.get(f"{url}/api/tags", timeout=3)
-                    models = r.json().get("models", [])
-                    extra = f" ({len(models)} models)"
-                except Exception:
-                    pass
-            elif name == "Supertonic TTS" and up:
-                extra = f" ({tts_info()})"
-        else:
-            up = Path(url).exists()
-            extra = ""
-        status = green("✓ UP") if up else red("✗ DOWN")
-        print(f"  {name:16s} {status} {dim(extra)}")
 
+    section("Services")
+    for name, url, endpoint in services:
+        full_url = f"{url}{endpoint}"
+        ok = check(full_url)
+        extra = ""
+        if ok and name == "Ollama":
+            try:
+                r = requests.get(f"{url}/api/tags", timeout=3)
+                models = r.json().get("models", [])
+                extra = f" ({len(models)} models)"
+            except Exception:
+                pass
+        elif ok and name == "Supertonic TTS":
+            extra = f" ({tts_info()})"
+        dot = status_dot(ok)
+        status_text = green("UP") if ok else red("DOWN")
+        print(f"  {dot} {name:16s} {status_text}{dim(extra)}")
+
+    section("Data")
     mem_cnt = mem_count()
     thr_cnt = thr_count()
-    print(f"  {dim(f'Memory entries: {mem_cnt}')}")
-    print(f"  {dim(f'Threads: {thr_cnt}')}")
+    print(f"  {bullet('Memory')} {cyan(str(mem_cnt))} {dim('entries')}")
+    print(f"  {bullet('Threads')} {cyan(str(thr_cnt))} {dim('conversations')}")

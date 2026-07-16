@@ -1,81 +1,77 @@
 # Aishe CLI
 
-**Voice-first AI assistant for your terminal.** Minimal interface, powerful internals.
+**Voice-first AI assistant for your terminal.**
+
+Aishe CLI is a standalone command-line AI assistant with voice input/output, persistent memory, chat threads, tool calling, and live voice conversation — all from your terminal.
 
 ```bash
-aishe status        # check all services
-aishe chat "hello"  # one-shot chat
-aishe live          # live voice conversation
-aishe repl          # continuous text chat
+curl -fsSL https://raw.githubusercontent.com/astromanish/aishe-cli/main/setup.sh | bash
+aishe status
+aishe chat "Hello!"
+aishe live
 ```
 
 ## Features
 
-- **Chat** — one-shot (`aishe chat`) and streaming (`aishe stream`) with tool calling
-- **REPL** — `aishe repl` for continuous text conversation (no voice deps needed)
-- **Live Voice** — `aishe live` for full voice conversation: record → STT → LLM → TTS → play
-- **VAD Recording** — voice activity detection (via webrtcvad) for natural turn-taking
-- **Memory** — persistent personal memory across sessions
+- **Chat** — one-shot and streaming chat with tool calling (calculator, timezone, memory, and more)
+- **Live Voice** — press Enter, speak, get a spoken response back. Full duplex: record → STT → LLM → TTS → play
+- **REPL** — continuous text chat mode with thread management
+- **Memory** — persistent personal memory. The AI remembers facts about you across sessions
 - **Threads** — multiple conversation threads with history
 - **Voice I/O** — transcribe audio files, synthesize text to speech
 - **Ollama Integration** — list, pull, and manage models
 - **Intent Lab** — log and analyze user intent classification stats
+- **Diagnostics** — comprehensive system check with roundtrip tests
+- **Export** — export memory and threads to Markdown/CSV
 - **Search** — full-text search across all threads and memory
-- **Export** — export threads (Markdown) and memory (Markdown/CSV)
-- **Doctor** — comprehensive diagnostics (services, deps, roundtrip tests)
-- **Config** — YAML config file with `aishe config get/set`
-- **Shell Completions** — `aishe completions bash|zsh|fish`
-- **macOS** — native mic recording via AVFoundation, audio playback via `afplay`
+- **Shell Completions** — bash, zsh, and fish
+
+## Quick Install
+
+```bash
+# One-command setup (installs deps, creates config, links to PATH)
+curl -fsSL https://raw.githubusercontent.com/astromanish/aishe-cli/main/setup.sh | bash
+
+# Or manually:
+pip install requests pyyaml
+ln -sf $(pwd)/aishe ~/.local/bin/aishe
+```
 
 ## Requirements
 
 - **Python 3.9+**
-- **`requests`** — `pip install requests`
-- **`pyyaml`** — `pip install pyyaml` (for config)
-- **`webrtcvad`** — `pip install webrtcvad` (for VAD recording, optional)
-- **`ffmpeg`** — `brew install ffmpeg` (for mic recording)
+- **`requests`** + **`pyyaml`** (auto-installed by setup script)
+- **`ffmpeg`** — for mic recording (`brew install ffmpeg` or `apt-get install ffmpeg`)
 - **Running services:**
-  - [Ollama](https://ollama.com) on `:11434`
+  - [Ollama](https://ollama.com) on `:11434` (local or cloud models)
   - [DeepAgent](https://github.com/langchain-ai/deepagents) sidecar on `:8765`
   - [Parakeet STT](https://github.com/nvidia/parakeet) on `:5093`
   - [Supertonic TTS](https://github.com/opencode-ai/supertonic-tts) on `:8766`
 
-## Install
-
-```bash
-# 1. Install Python dependencies
-pip install requests pyyaml webrtcvad
-
-# 2. Symlink to your PATH
-ln -sf $(pwd)/aishe ~/.local/bin/aishe
-
-# 3. Verify
-aishe status
-```
-
 ## Usage
 
-### Status & Diagnostics
+### Status
 ```bash
-aishe status        # quick service health
-aishe doctor        # comprehensive diagnostics + roundtrip tests
+aishe status
 ```
+Shows all service health with beautiful boxed UI, model counts, memory entries, and thread counts.
 
 ### Chat
 ```bash
-aishe chat "What is 15 * 4?"          # one-shot
-aishe chat "What time is it in Tokyo?" -v  # verbose: show tool calls
-aishe stream "Tell me a short joke"    # streaming: tokens print live
-aishe repl                             # continuous text REPL
+aishe chat "What is 15 * 4?"
+aishe chat "What time is it in Tokyo?" -v   # verbose: shows tool calls
+aishe stream "Tell me a short joke"          # streaming: tokens print live
+aishe repl                                   # continuous text chat mode
 ```
 
 ### Live Voice Conversation
 ```bash
 aishe live                    # press Enter to record, speak, get spoken response
-aishe live --list             # list available microphone devices
-aishe live -d 1               # use specific mic device
-aishe live --no-vad           # disable VAD, use fixed duration
-aishe live -V M1              # use male voice for TTS
+aishe live --list              # list available microphone devices
+aishe live -d 1                # use specific mic device
+aishe live --duration 8        # record 8 seconds per turn
+aishe live --no-tts            # voice input only, text responses
+aishe live -V M1               # use male voice for TTS
 ```
 
 ### Memory
@@ -94,21 +90,6 @@ aishe threads --show <id>      # show thread messages
 aishe threads --delete <id>    # delete a thread
 ```
 
-### Search & Export
-```bash
-aishe search "project"         # search threads + memory
-aishe export                   # export all data to ~/Downloads/
-aishe export -d ~/Documents    # export to custom directory
-```
-
-### Config
-```bash
-aishe config                   # view full config
-aishe config get voice.default_voice
-aishe config set voice.default_voice M1
-aishe config set voice.recording_duration 8
-```
-
 ### Voice I/O
 ```bash
 aishe voice status
@@ -125,10 +106,23 @@ aishe ollama whoami
 aishe ollama signin
 ```
 
-### Intent Lab
+### Diagnostics
 ```bash
-aishe intent stats --days 7
-aishe intent export
+aishe doctor
+```
+Runs comprehensive checks: Python environment, dependencies, external tools, all services, STT/TTS/DeepAgent roundtrip tests.
+
+### Search & Export
+```bash
+aishe search "pizza"           # search across memory + threads
+aishe export                   # export all data to ~/Downloads
+```
+
+### Configuration
+```bash
+aishe config                   # view full config
+aishe config get voice.default_voice
+aishe config set voice.default_voice M1
 ```
 
 ### Shell Completions
@@ -159,8 +153,6 @@ The CLI talks to four local services:
 - **Parakeet STT** — Speech-to-text (NVIDIA Parakeet ONNX model)
 - **Supertonic TTS** — Text-to-speech (ONNX-based, 10 voices)
 
-Memory and threads are stored as JSONL/JSON files at `~/Library/Application Support/aishe/`.
-
 ## Data
 
 All data is local:
@@ -171,7 +163,7 @@ All data is local:
 
 ## Extending
 
-The CLI is organized as a Python package (`aishe_pkg/`) — easy to fork, modify, and build upon. The architecture is service-oriented: swap in any OpenAI-compatible LLM, any STT/TTS backend, or add new tools to the DeepAgent sidecar.
+The CLI is a single Python package — easy to fork, modify, and build upon. The architecture is service-oriented: swap in any OpenAI-compatible LLM, any STT/TTS backend, or add new tools to the DeepAgent sidecar.
 
 ## License
 

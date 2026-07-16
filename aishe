@@ -1,14 +1,18 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Aishe CLI — voice-first AI assistant for your terminal.
+
+A standalone command-line AI assistant with voice input/output,
+persistent memory, chat threads, tool calling, and live voice
+conversation — all from your terminal.
 
 Usage:
   aishe status                 — check all services
   aishe chat "hello"           — one-shot chat
-  aishe stream "hello"         — streaming chat
+  aishe stream "hello"         — streaming chat (tokens printed live)
   aishe repl                   — continuous text REPL
   aishe live                   — live voice conversation
   aishe doctor                 — run diagnostics
-  aishe search "query"          — search threads + memory
+  aishe search "query"         — search threads + memory
   aishe export                 — export all data
   aishe config                 — view/edit config
   aishe version                — show version
