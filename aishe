@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Aishe CLI — command-line interface for all Aishe Tauri app features.
+"""Aishe CLI — voice-first AI assistant for your terminal.
 
-Hits the same HTTP endpoints the desktop app uses:
-  - DeepAgent  :8765  (chat, stream)
-  - Ollama     :11434 (models)
-  - Parakeet   :5093  (STT)
-  - Supertonic :8766  (TTS)
-  - File-based memory & threads at ~/Library/Application Support/aishe/
+A standalone command-line AI assistant with voice input/output,
+memory, chat threads, and tool calling. Works with local or cloud
+LLMs via Ollama, Parakeet STT, and Supertonic TTS.
 
 Usage:
   aishe status                 — check all services
-  aishe chat "hello"           — one-shot chat (DeepAgent)
+  aishe chat "hello"           — one-shot chat
   aishe stream "hello"         — streaming chat (tokens printed live)
   aishe live                   — live voice conversation (press Enter to record)
   aishe live --list            — list mic devices
@@ -121,11 +118,9 @@ def cmd_status(args):
         status = green("✓ UP") if up else red("✗ DOWN")
         print(f"  {name:16s} {status} {dim(extra)}")
 
-    # Memory count
     if MEMORY_FILE.exists():
         count = sum(1 for line in MEMORY_FILE.read_text().splitlines() if line.strip())
         print(f"  {dim(f'Memory entries: {count}')}")
-    # Threads count
     if THREADS_DIR.exists():
         count = len(list(THREADS_DIR.glob("*.json")))
         print(f"  {dim(f'Threads: {count}')}")
@@ -145,7 +140,7 @@ def cmd_chat(args):
         r.raise_for_status()
         data = r.json()
     except requests.exceptions.ConnectionError:
-        print(red("Cannot reach DeepAgent on :8765. Start it first:")); print(f"  cd aishe-tauri/deepagent && .venv/bin/python server.py")
+        print(red("Cannot reach DeepAgent on :8765. Is the sidecar running?"))
         sys.exit(1)
     except Exception as e:
         print(red(f"Error: {e}")); sys.exit(1)
@@ -190,7 +185,7 @@ def cmd_stream(args):
                 answer = ev.get("answer", "")
     if not answer:
         print(dim("(empty response)"))
-    print()  # final newline
+    print()
 
 # ─── Threads ───────────────────────────────────────────────────────────────
 
@@ -357,7 +352,6 @@ def cmd_voice(args):
         return
 
     if args.action == "speak":
-        # Merge file (positional, may eat first word) + text (rest of words)
         parts = []
         if args.file:
             parts.append(args.file)
@@ -447,7 +441,7 @@ def cmd_intent(args):
         correct = 0
         misclassified = 0
         for f in INTENT_DIR.glob("intent_*.jsonl"):
-            name = f.stem  # intent_YYYY-MM-DD
+            name = f.stem
             date_str = name.replace("intent_", "")
             try:
                 from datetime import date
@@ -502,7 +496,6 @@ def cmd_intent(args):
 # ─── Live Voice I/O ─────────────────────────────────────────────────────────
 
 def list_mic_devices():
-    """List available AVFoundation audio input devices."""
     try:
         r = subprocess.run(
             ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
@@ -526,7 +519,6 @@ def list_mic_devices():
         return []
 
 def record_audio(duration, device_index, outpath):
-    """Record audio from mic using ffmpeg."""
     cmd = [
         "ffmpeg", "-y",
         "-f", "avfoundation",
@@ -540,7 +532,6 @@ def record_audio(duration, device_index, outpath):
     return r.returncode == 0
 
 def transcribe_file(filepath):
-    """Transcribe a wav file via Parakeet STT."""
     with open(filepath, "rb") as f:
         resp = requests.post(
             f"{STT}/v1/audio/transcriptions",
@@ -552,7 +543,6 @@ def transcribe_file(filepath):
     return resp.json().get("text", "").strip()
 
 def synthesize_speak(text, voice="F4", play=True):
-    """Synthesize speech via Supertonic TTS and optionally play it."""
     resp = requests.post(
         f"{TTS}/v1/audio/speech",
         json={"input": text, "voice": voice, "model": "supertonic-3", "response_format": "wav"},
@@ -568,12 +558,10 @@ def synthesize_speak(text, voice="F4", play=True):
     return outpath
 
 def cmd_live(args):
-    """Live voice conversation: record → STT → DeepAgent (streaming) → TTS → play, in a loop."""
     import threading
     import signal as sig_mod
     import time
 
-    # Check services
     if not check(f"{STT}/healthz"):
         print(red("Parakeet STT is down on :5093")); sys.exit(1)
     if not check(f"{TTS}/health"):
@@ -581,12 +569,10 @@ def cmd_live(args):
     if not check(f"{DEEPAGENT}/health"):
         print(red("DeepAgent is down on :8765")); sys.exit(1)
 
-    # Find mic device
     devices = list_mic_devices()
     if not devices:
         print(red("No microphone devices found")); sys.exit(1)
 
-    # Auto-select or use specified device
     device_idx = args.device
     if device_idx is None:
         for idx, name in devices:
@@ -596,7 +582,6 @@ def cmd_live(args):
         if device_idx is None:
             device_idx = devices[0][0]
 
-    # Print available devices
     print(bold("🎤 Live Voice Mode"))
     print(f"  Mic: {cyan(f'[{device_idx}]')} {dict(devices).get(device_idx, '?')}")
     print(f"  STT: {green('Parakeet :5093')}  TTS: {green('Supertonic :8766')}  LLM: {green('DeepAgent :8765')}")
@@ -617,7 +602,6 @@ def cmd_live(args):
             break
 
         if not user_input:
-            # Record from mic
             print(dim(f"  🔴 Recording {args.duration}s..."), end="", flush=True)
             recpath = f"/tmp/aishe_live_rec_{uuid.uuid4().hex[:8]}.wav"
             ok = record_audio(args.duration, device_idx, recpath)
@@ -649,7 +633,6 @@ def cmd_live(args):
         else:
             user_text = user_input
 
-        # ── Stream from DeepAgent with full tool visibility ──
         print()
         try:
             r = requests.post(
@@ -705,7 +688,6 @@ def cmd_live(args):
         if tool_calls:
             print(f"  {dim(f'└─ tools used: {", ".join(tool_calls)}')}")
 
-        # TTS
         if not args.no_tts and answer.strip():
             print(f"  {dim('🔊 Speaking...')}", end="", flush=True)
             try:
@@ -719,7 +701,7 @@ def cmd_live(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="aishe",
-        description="Aishe CLI — voice-first AI for Bharat",
+        description="Aishe CLI — voice-first AI assistant for your terminal",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -740,32 +722,26 @@ Examples:
     )
     sub = parser.add_subparsers(dest="command")
 
-    # status
     sub.add_parser("status", help="Check all service statuses")
 
-    # chat
     p_chat = sub.add_parser("chat", help="One-shot chat via DeepAgent")
     p_chat.add_argument("message", nargs="*", help="Message to send (or pipe via stdin)")
     p_chat.add_argument("-t", "--thread", default="cli", help="Thread ID")
     p_chat.add_argument("-v", "--verbose", action="store_true", help="Show tool calls")
 
-    # stream
     p_stream = sub.add_parser("stream", help="Streaming chat (tokens printed live)")
     p_stream.add_argument("message", nargs="*", help="Message to send (or pipe via stdin)")
     p_stream.add_argument("-t", "--thread", default="cli", help="Thread ID")
 
-    # threads
     p_threads = sub.add_parser("threads", help="Manage chat threads")
     p_threads.add_argument("--new", action="store_true", help="Create a new thread")
     p_threads.add_argument("--delete", metavar="ID", help="Delete a thread")
     p_threads.add_argument("--show", metavar="ID", help="Show thread messages")
 
-    # memory
     p_mem = sub.add_parser("memory", help="Memory management")
     p_mem.add_argument("action", choices=["add", "search", "list", "clear"], help="Memory action")
     p_mem.add_argument("value", nargs="*", help="Fact text or search query")
 
-    # voice
     p_voice = sub.add_parser("voice", help="Voice input/output")
     p_voice.add_argument("action", choices=["transcribe", "speak", "status"], help="Voice action")
     p_voice.add_argument("file", nargs="?", help="Audio file path (for transcribe)")
@@ -774,17 +750,14 @@ Examples:
     p_voice.add_argument("--output", "-o", help="Save audio to file (no auto-play)")
     p_voice.add_argument("--no-play", action="store_true", help="Don't auto-play audio")
 
-    # ollama
     p_ollama = sub.add_parser("ollama", help="Ollama model management")
     p_ollama.add_argument("action", choices=["models", "pull", "whoami", "signin"], help="Ollama action")
     p_ollama.add_argument("model", nargs="?", help="Model name (for pull)")
 
-    # intent
     p_intent = sub.add_parser("intent", help="Intent lab")
     p_intent.add_argument("action", choices=["stats", "export"], help="Intent action")
     p_intent.add_argument("--days", type=int, default=7, help="Days to include")
 
-    # live
     p_live = sub.add_parser("live", help="Live voice conversation (record → STT → think → TTS)")
     p_live.add_argument("-d", "--device", type=int, default=None, help="Mic device index (use 'aishe live --list' to see)")
     p_live.add_argument("--duration", type=int, default=5, help="Recording duration in seconds")
