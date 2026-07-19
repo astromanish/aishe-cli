@@ -20,6 +20,7 @@ from . import __version__
 from .config import cmd_config, get, get_config_path, load
 from .memory import cmd_memory, count as mem_count, export_csv as mem_export_csv, export_markdown as mem_export_md, list_all as mem_list, search as mem_search
 from .ollama import cmd_ollama, health as ollama_health
+from .pet import cmd_pet
 from .threads import cmd_threads, count as thr_count, export_markdown as thr_export_md, list_all as thr_list, search as thr_search
 from .util import (
     Spinner, bold, check, cyan, dim, green, red, yellow,
@@ -52,6 +53,8 @@ def cmd_chat(args: Any) -> None:
         sys.exit(1)
 
     tid = args.thread or "cli"
+    from .pet import send_signal
+    send_signal("thinking", {"thread_id": tid, "stage": "start"})
     try:
         r = requests.post(
             f"{DEEPAGENT_URL}/invoke",
@@ -61,9 +64,11 @@ def cmd_chat(args: Any) -> None:
         r.raise_for_status()
         data = r.json()
     except requests.exceptions.ConnectionError:
+        send_signal("error", {"error": "deepagent_down"})
         print(red("Cannot reach DeepAgent on :8765. Is the sidecar running?"))
         sys.exit(1)
     except Exception as e:
+        send_signal("error", {"error": str(e)[:50]})
         print(red(f"Error: {e}"))
         sys.exit(1)
 
@@ -72,6 +77,21 @@ def cmd_chat(args: Any) -> None:
         print(dim(f"\n─ stats: {data.get('steps', '?')} steps, {len(data.get('tool_calls', []))} tool calls"))
         for tc in data.get("tool_calls", []):
             print(dim(f"  tool: {tc['name']}({json.dumps(tc['args'], ensure_ascii=False)})"))
+    # Bump pet counters
+    try:
+        from .pet import PetState, check_milestones, update_streak
+        ps = PetState.load()
+        ps.n_chats += 1
+        if data.get("answer"):
+            ps.total_tokens += len(data["answer"].split())
+        update_streak(ps)
+        new_ms = check_milestones(ps)
+        if new_ms:
+            ps.milestones.extend(new_ms)
+        ps.save()
+    except Exception:
+        pass
+    send_signal("idle", {"last": "chat", "thread_id": tid, "mem_count": mem_count()})
 
 
 def cmd_stream(args: Any) -> None:
@@ -83,6 +103,8 @@ def cmd_stream(args: Any) -> None:
         sys.exit(1)
 
     tid = args.thread or "cli"
+    from .pet import send_signal
+    send_signal("thinking", {"thread_id": tid, "stage": "stream_start"})
     try:
         r = requests.post(
             f"{DEEPAGENT_URL}/stream",
@@ -92,10 +114,12 @@ def cmd_stream(args: Any) -> None:
         )
         r.raise_for_status()
     except requests.exceptions.ConnectionError:
+        send_signal("error", {"error": "deepagent_down"})
         print(red("Cannot reach DeepAgent on :8765."))
         sys.exit(1)
 
     answer = ""
+    token_count = 0
     for line in r.iter_lines():
         if not line:
             continue
@@ -108,6 +132,9 @@ def cmd_stream(args: Any) -> None:
             tok = ev.get("content", "")
             print(tok, end="", flush=True)
             answer += tok
+            token_count += 1
+            if token_count % 8 == 0:
+                send_signal("thinking", {"thread_id": tid, "tokens": token_count})
         elif etype == "tool_call":
             print(yellow(f"\n  [tool: {ev.get('name', '?')}]"), flush=True)
         elif etype == "tool_result":
@@ -118,6 +145,7 @@ def cmd_stream(args: Any) -> None:
     if not answer:
         print(dim("(empty response)"))
     print()
+    send_signal("idle", {"last": "stream", "thread_id": tid, "tokens": token_count})
 
 
 # ─── REPL (text-based continuous chat) ─────────────────────────────────────
@@ -238,6 +266,10 @@ def cmd_live(args: Any) -> None:
 
     tid = args.thread or "live"
     consecutive_errors = 0
+    from .pet import send_signal, PetState
+    _pet = PetState.load()
+    _pet.n_voice_sessions += 1
+    _pet.save()
 
     while True:
         try:
@@ -248,6 +280,7 @@ def cmd_live(args: Any) -> None:
 
         if not user_input:
             print(dim("  🔴 Recording..."), end="", flush=True)
+            send_signal("listening", {"thread_id": tid})
             recpath = f"/tmp/aishe_live_rec_{datetime.now().strftime('%H%M%S%f')}.wav"
 
             if vad_enabled:
@@ -341,11 +374,14 @@ def cmd_live(args: Any) -> None:
 
         if not args.no_tts and answer.strip():
             print(f"  {dim('🔊 Speaking...')}", end="", flush=True)
+            send_signal("speaking", {"thread_id": tid, "len": len(answer)})
             try:
                 synthesize(answer, voice=voice, play=True)
                 print(f"\r  {green('🔊 Spoken')}                    ")
             except Exception as e:
                 print(f"\r  {yellow(f'TTS failed: {e}')}                    ")
+        else:
+            send_signal("idle", {"last": "live", "thread_id": tid})
 
 
 # ─── Doctor ─────────────────────────────────────────────────────────────────
@@ -428,6 +464,22 @@ def cmd_doctor(args: Any) -> None:
     thr_cnt = thr_count()
     print(f"  {bullet('Memory entries')} {cyan(str(mem_cnt))}")
     print(f"  {bullet('Threads')} {cyan(str(thr_cnt))}")
+
+    # 5b. Pet
+    section("Pet")
+    try:
+        from .pet import PetState
+        ps = PetState.load()
+        print(f"  {bullet('Enabled')} {cyan(str(ps.enabled))}")
+        print(f"  {bullet('Born')} {cyan(ps.born or '—')}")
+        print(f"  {bullet('Last seen')} {cyan(ps.last_seen or '—')}")
+        print(f"  {bullet('Chats / Voice')} {cyan(str(ps.n_chats))} / {cyan(str(ps.n_voice_sessions))}")
+        print(f"  {bullet('Size')} {cyan(f'{ps.size:.2f}')}")
+        print(f"  {bullet('Streak')} {cyan(str(ps.streak_days))} {dim('day(s)')}")
+        if ps.milestones:
+            print(f"  {bullet('Milestones')} {cyan(', '.join(ps.milestones))}")
+    except Exception as e:
+        print(f"  {red('pet error: ' + str(e))}")
 
     # 6. STT roundtrip test
     section("STT Roundtrip")
@@ -599,7 +651,7 @@ def cmd_completions(args: Any) -> None:
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="status chat stream repl live threads memory voice ollama intent config doctor search export version completions"
+    opts="status chat stream repl live threads memory voice ollama intent config doctor search export version completions pet"
 
     if [[ ${cur} == -* ]] ; then
         COMPREPLY=( $(compgen -W "--help" -- ${cur}) )
@@ -634,6 +686,9 @@ def cmd_completions(args: Any) -> None:
         completions)
             COMPREPLY=( $(compgen -W "bash zsh fish" -- ${cur}) )
             ;;
+        pet)
+            COMPREPLY=( $(compgen -W "status inspect reset enable disable signal milestones attach detach watch --mood --state --width --height --fps --direction --ratio --window" -- ${cur}) )
+            ;;
         *)
             COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
             ;;
@@ -662,6 +717,7 @@ _aishe() {
         'export:Export data'
         'version:Show version'
         'completions:Generate shell completions'
+        'pet:Your terminal blob pet'
     )
     _describe 'aishe' commands
 }
@@ -685,6 +741,7 @@ complete -c aishe -a "search" -d "Search threads and memory"
 complete -c aishe -a "export" -d "Export data"
 complete -c aishe -a "version" -d "Show version"
 complete -c aishe -a "completions" -d "Generate shell completions"
+complete -c aishe -a "pet" -d "Your terminal blob pet"
 """)
     else:
         print(red(f"Unknown shell: {shell}. Use bash, zsh, or fish."))
@@ -784,6 +841,12 @@ def main() -> None:
   aishe stream "Tell me a joke"
   aishe repl                    — continuous text chat
   aishe live                    — live voice conversation
+  aishe pet                     — your terminal blob (foreground, animated)
+  aishe pet status              — one-shot frame
+  aishe pet inspect             — dump all pet state as JSON
+  aishe pet attach              — attach pet as tmux side-pane (runs persistently)
+  aishe pet detach              — detach the side-pane
+  aishe pet watch install       — auto-attach pet in every new tmux window
   aishe doctor                  — run diagnostics
   aishe search "query"          — search threads + memory
   aishe export                  — export all data
@@ -878,6 +941,32 @@ def main() -> None:
     p_comp = sub.add_parser("completions", help="Generate shell completion scripts")
     p_comp.add_argument("shell", nargs="?", default="bash", choices=["bash", "zsh", "fish"], help="Shell type")
 
+    # pet
+    p_pet = sub.add_parser("pet", help="Your aishe blob — terminal pet that reflects activity")
+    p_pet.add_argument("pet_action", nargs="?",
+                       choices=["status", "inspect", "reset", "enable", "disable", "signal", "milestones", "attach", "detach", "watch"],
+                       help="Pet action (default = foreground animation)")
+    p_pet.add_argument("--mood", choices=["idle", "thinking", "listening", "speaking", "error", "greeting"],
+                       help="Mood for `pet status` (default: last seen)")
+    p_pet.add_argument("--state", choices=["idle", "thinking", "listening", "speaking", "error", "greeting"],
+                       help="Signal state (for `pet signal`)")
+    p_pet.add_argument("--width", type=int, default=None, help="Frame width in cells")
+    p_pet.add_argument("--height", type=int, default=None, help="Frame height in cells")
+    p_pet.add_argument("--fps", type=int, default=None, help="Frames per second for foreground mode")
+    # attach-specific flags
+    p_pet.add_argument("--direction", choices=["right", "bottom"], default="right",
+                       help="For `pet attach`: split direction (default right)")
+    p_pet.add_argument("--ratio", type=int, default=30,
+                       help="For `pet attach`: %% of pane given to pet (5-95, default 30)")
+    p_pet.add_argument("--window", action="store_true",
+                       help="For `pet attach`: open a separate terminal window instead of tmux split")
+    p_pet.add_argument("--no-pane", action="store_true",
+                       help=argparse.SUPPRESS)  # alias for --window
+    # watch sub-action
+    p_pet.add_argument("watch_action", nargs="?",
+                       choices=["install", "uninstall", "status"],
+                       help="Watch sub-action: install/uninstall the tmux auto-attach hook")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -943,6 +1032,7 @@ def main() -> None:
         "export": cmd_export,
         "version": cmd_version,
         "completions": cmd_completions,
+        "pet": cmd_pet,
     }
 
     dispatch[args.command](args)

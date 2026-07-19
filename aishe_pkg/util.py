@@ -118,6 +118,8 @@ def welcome() -> None:
     print(f"  {bold('│')}  {dim('Voice-first AI for your terminal')}    {bold('│')}")
     print(f"  {bold('╰──────────────────────────────────────────╯')}")
     print()
+    print(f"  {dim('Try: aishe pet · aishe status · aishe live')}")
+    print()
 
 
 def prompt_text() -> str:
