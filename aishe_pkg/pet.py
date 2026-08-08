@@ -335,26 +335,49 @@ class Pet:
         # Size scales the orbit radius slightly
         params.orbit_radius = 0.45 * (0.9 + 0.1 * (self._state.size - 1.0))
 
-        # Palette shift by state
+        # Palette shift by state — all states stay within B/W + Indian
+        # flag colors (saffron #FF9933, white #FFFFFF, green #138808,
+        # Ashoka Chakra navy #000080). Each state skews the Tiranga
+        # gradient toward a different band.
         if self.state_name == "error":
+            # Saffron = warning (courage/sacrifice in flag symbolism)
             params.palette = [
-                (30, 8, 8), (100, 30, 30), (170, 60, 50),
-                (210, 120, 80), (230, 170, 100), (240, 210, 130),
+                (0, 0, 0),         # black
+                (40, 30, 12),      # deep saffron shadow
+                (160, 96, 32),     # darkened saffron
+                (255, 153, 51),    # India saffron
+                (255, 230, 200),   # saffron-tinted white
+                (255, 255, 255),   # white
             ]
         elif self.state_name == "thinking":
+            # Navy / white — the Ashoka Chakra (deep thought, the wheel)
             params.palette = [
-                (15, 12, 30), (45, 30, 70), (90, 60, 110),
-                (140, 100, 160), (200, 160, 180), (230, 200, 180),
+                (0, 0, 0),         # black
+                (0, 0, 80),        # chakra navy
+                (60, 60, 160),     # light navy
+                (200, 210, 255),   # navy-tinted white
+                (240, 245, 255),   # cool white
+                (255, 255, 255),   # white
             ]
         elif self.state_name == "speaking":
+            # Saffron-dominant — first band of the Tiranga
             params.palette = [
-                (20, 15, 5), (70, 50, 15), (130, 95, 30),
-                (190, 145, 55), (220, 175, 80), (240, 210, 130),
+                (0, 0, 0),         # black
+                (80, 48, 16),      # deep saffron shadow
+                (200, 120, 40),    # darkened saffron
+                (255, 153, 51),    # India saffron
+                (255, 220, 180),   # saffron-tinted white
+                (255, 255, 255),   # white
             ]
         elif self.state_name == "greeting":
+            # Green-dominant — third band, "welcome / namaste"
             params.palette = [
-                (15, 25, 20), (50, 90, 70), (90, 150, 110),
-                (160, 200, 130), (210, 220, 150), (240, 230, 170),
+                (0, 0, 0),         # black
+                (8, 54, 3),        # deep green shadow
+                (14, 102, 6),      # darkened India green
+                (19, 136, 8),      # India green
+                (180, 230, 170),   # green-tinted white
+                (255, 255, 255),   # white
             ]
 
         points = blob.make_points(params, t=0.0)
@@ -436,12 +459,52 @@ class Pet:
 
 # ─── Commands ───────────────────────────────────────────────────────────────
 
+def _native_pet_path() -> Optional[str]:
+    """Return the path to the native macOS pet binary, if available."""
+    import platform
+    import shutil
+    if platform.system() != "Darwin":
+        return None
+    candidates = [
+        os.path.expanduser("~/Documents/Aishe/macOS-Pet/.build/debug/AishePet"),
+        os.path.expanduser("~/Documents/Aishe/macOS-Pet/.build/release/AishePet"),
+        "/Applications/Aishe Pet.app/Contents/MacOS/AishePet",
+        shutil.which("aishe-pet"),
+    ]
+    for p in candidates:
+        if p and os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
 def cmd_pet(args: Any) -> None:
     """Dispatch subcommands for `aishe pet`."""
     state = PetState.load()
 
-    # No subcommand: foreground animation
+    # No subcommand: prefer the native macOS app if available, else
+    # fall back to the in-terminal animation loop.
     if not getattr(args, "pet_action", None):
+        native = _native_pet_path()
+        if native:
+            import subprocess
+            try:
+                # Tell the native app to start in greeting mode
+                send_signal("greeting", {"mem_count": mem_count_safe()})
+                # Detach so closing the terminal doesn't kill the pet
+                subprocess.Popen(
+                    [native],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                print(green("◉ Aishe Pet — native window launched."))
+                print(dim(f"  Binary: {native}"))
+                print(dim("  Drag to move · Right-click for menu · Cmd-Q to quit"))
+                print(dim("  Window reads the same signal log as this CLI."))
+                return
+            except Exception as e:
+                print(yellow(f"Native launch failed ({e}), falling back to terminal."))
+        # Fallback: existing in-terminal animation
         if not state.enabled:
             print(yellow("Pet is disabled. Run: aishe pet enable"))
             sys.exit(0)

@@ -21,7 +21,7 @@ from .config import cmd_config, get, get_config_path, load
 from .memory import cmd_memory, count as mem_count, export_csv as mem_export_csv, export_markdown as mem_export_md, list_all as mem_list, search as mem_search
 from .ollama import cmd_ollama, health as ollama_health
 from .pet import cmd_pet
-from .threads import cmd_threads, count as thr_count, export_markdown as thr_export_md, list_all as thr_list, search as thr_search
+from .threads import add_message as thr_add_message, cmd_threads, count as thr_count, delete as thr_delete, ensure_thread, export_markdown as thr_export_md, list_all as thr_list, search as thr_search
 from .util import (
     Spinner, bold, check, cyan, dim, green, red, yellow,
     header, section, bullet, status_dot, key_value, divider,
@@ -55,6 +55,10 @@ def cmd_chat(args: Any) -> None:
     tid = args.thread or "cli"
     from .pet import send_signal
     send_signal("thinking", {"thread_id": tid, "stage": "start"})
+
+    # Ensure thread exists and save user message
+    thr_add_message(tid, "user", msg)
+
     try:
         r = requests.post(
             f"{DEEPAGENT_URL}/invoke",
@@ -72,7 +76,10 @@ def cmd_chat(args: Any) -> None:
         print(red(f"Error: {e}"))
         sys.exit(1)
 
-    print(data.get("answer", ""))
+    answer = data.get("answer", "")
+    print(answer)
+    if answer:
+        thr_add_message(tid, "assistant", answer)
     if args.verbose:
         print(dim(f"\n─ stats: {data.get('steps', '?')} steps, {len(data.get('tool_calls', []))} tool calls"))
         for tc in data.get("tool_calls", []):
@@ -105,6 +112,10 @@ def cmd_stream(args: Any) -> None:
     tid = args.thread or "cli"
     from .pet import send_signal
     send_signal("thinking", {"thread_id": tid, "stage": "stream_start"})
+
+    # Ensure thread exists and save user message
+    thr_add_message(tid, "user", msg)
+
     try:
         r = requests.post(
             f"{DEEPAGENT_URL}/stream",
@@ -144,6 +155,8 @@ def cmd_stream(args: Any) -> None:
                 answer = ev.get("answer", "")
     if not answer:
         print(dim("(empty response)"))
+    else:
+        thr_add_message(tid, "assistant", answer)
     print()
     send_signal("idle", {"last": "stream", "thread_id": tid, "tokens": token_count})
 
@@ -159,8 +172,8 @@ def cmd_repl(args: Any) -> None:
     tid = args.thread or "repl"
     print(bold("💬 Aishe REPL"))
     print(dim("Type your message and press Enter. Type /exit, /quit, or Ctrl+C to exit."))
-    print(dim("Commands: /new (new thread), /thread <id> (switch thread), /clear (clear screen)"))
-    print("─" * 50)
+    print(dim("Commands: /new (new thread), /thread <id> (switch), /title <name>, /threads, /delete <id>, /clear"))
+    print(dim("─" * 50))
 
     while True:
         try:
@@ -180,12 +193,52 @@ def cmd_repl(args: Any) -> None:
             continue
         if user_input.lower() == "/new":
             tid = f"repl_{datetime.now().strftime('%H%M%S')}"
+            ensure_thread(tid)
             print(dim(f"  New thread: {tid}"))
             continue
         if user_input.lower().startswith("/thread "):
             tid = user_input.split(" ", 1)[1].strip()
+            ensure_thread(tid)
             print(dim(f"  Switched to thread: {tid}"))
             continue
+        if user_input.lower().startswith("/title "):
+            new_title = user_input.split(" ", 1)[1].strip()
+            t = ensure_thread(tid)
+            t["title"] = new_title
+            t["updated_at"] = datetime.now().isoformat()
+            from .threads import _save_thread
+            _save_thread(t)
+            print(dim(f"  Renamed thread to: {new_title}"))
+            continue
+        if user_input.lower() == "/threads":
+            threads = thr_list()
+            print(dim(f"\n  Threads ({len(threads)}):"))
+            for t in threads[:20]:
+                n = len(t.get("messages", []))
+                marker = "* " if t["id"] == tid else "  "
+                print(dim(f"  {marker}{t['id'][:20]:22s} {t.get('title','untitled'):20s} {n} msgs"))
+            print()
+            continue
+        if user_input.lower().startswith("/delete"):
+            parts = user_input.split()
+            if len(parts) < 2:
+                print(red("  Usage: /delete <thread_id>"))
+                continue
+            target = parts[1]
+            if thr_delete(target):
+                print(dim(f"  Deleted {target}"))
+                if target == tid:
+                    tid = f"repl_{datetime.now().strftime('%H%M%S')}"
+                    ensure_thread(tid)
+            else:
+                print(red(f"  Thread {target} not found"))
+            continue
+
+        # Print user turn in markdown-style block
+        print(f"\n{green('>')} {green(user_input)}")
+
+        # Save user turn
+        thr_add_message(tid, "user", user_input)
 
         try:
             r = requests.post(
@@ -196,10 +249,16 @@ def cmd_repl(args: Any) -> None:
             )
             r.raise_for_status()
         except Exception as e:
-            print(f"  {red(f'Error: {e}')}")
+            print(f"\n  {red(f'Error: {e}')}")
             continue
 
         answer = ""
+        tool_calls: List[str] = []
+        in_tool = False
+
+        # Assistant prefix line
+        print(f"\n{cyan('##')} ", end="")
+
         for line in r.iter_lines():
             if not line:
                 continue
@@ -213,12 +272,34 @@ def cmd_repl(args: Any) -> None:
                 print(tok, end="", flush=True)
                 answer += tok
             elif etype == "tool_call":
-                print(yellow(f"\n  ⚡ {ev.get('name', '?')}"), flush=True)
+                name = ev.get("name", "?")
+                tool_calls.append(name)
+                if not in_tool:
+                    print(f"\n{dim('```tools')}")
+                    in_tool = True
+                print(f"  {yellow('•')} {cyan(name)}")
+            elif etype == "tool_result":
+                result = ev.get("result", "")
+                result_short = result[:200] + ("..." if len(result) > 200 else "")
+                print(f"    {dim('└─')} {result_short}")
             elif etype == "final":
                 if not answer:
                     answer = ev.get("answer", "")
+
+        # Persist assistant turn
         if answer:
+            thr_add_message(tid, "assistant", answer)
+
+        if in_tool:
+            print(dim("```"))
+        elif answer:
             print()
+
+        if answer and not answer.endswith("\n"):
+            print()
+
+        # Close assistant turn
+        print(dim("─" * 50))
 
 
 # ─── Live Voice ──────────────────────────────────────────────────────────────
@@ -317,12 +398,15 @@ def cmd_live(args: Any) -> None:
                 print(f"\r  {yellow('(empty transcription)')}                    ")
                 continue
 
-            print(f"\r  {cyan('You said:')} {user_text}                    ")
+            print(f"\r  {green('>')} {green(user_text)}                    ")
             consecutive_errors = 0
         else:
             user_text = user_input
+            print(f"\n{green('>')} {green(user_input)}")
 
-        print()
+        # Persist user turn
+        thr_add_message(tid, "user", user_text)
+
         try:
             r = requests.post(
                 f"{DEEPAGENT_URL}/stream",
@@ -332,11 +416,15 @@ def cmd_live(args: Any) -> None:
             )
             r.raise_for_status()
         except Exception as e:
-            print(f"  {red(f'DeepAgent error: {e}')}")
+            print(f"\n  {red(f'DeepAgent error: {e}')}")
             continue
 
         answer = ""
         tool_calls: List[str] = []
+        in_tool = False
+
+        # Assistant prefix line
+        print(f"\n{cyan('##')} ", end="")
 
         for line in r.iter_lines():
             if not line:
@@ -351,11 +439,14 @@ def cmd_live(args: Any) -> None:
                 name = ev.get("name", "?")
                 args_str = json.dumps(ev.get("args", {}), ensure_ascii=False)
                 tool_calls.append(name)
-                print(f"  {yellow('⚡ tool_call')} {cyan(name)}({args_str})")
+                if not in_tool:
+                    print(f"\n{dim('```tools')}")
+                    in_tool = True
+                print(f"  {yellow('•')} {cyan(name)}({args_str})")
             elif etype == "tool_result":
                 result = ev.get("result", "")
                 result_short = result[:200] + ("..." if len(result) > 200 else "")
-                print(f"  {dim('   └─ result:')} {result_short}")
+                print(f"    {dim('└─')} {result_short}")
             elif etype == "token":
                 tok = ev.get("content", "")
                 if tok:
@@ -365,12 +456,20 @@ def cmd_live(args: Any) -> None:
                 if not answer:
                     answer = ev.get("answer", "")
 
+        # Persist assistant turn
         if answer:
+            thr_add_message(tid, "assistant", answer)
+
+        if in_tool:
+            print(dim("```"))
+        elif answer:
             print()
 
-        if tool_calls:
-            tools_str = ", ".join(tool_calls)
-            print(f"  {dim(f'└─ tools used: {tools_str}')}")
+        if answer and not answer.endswith("\n"):
+            print()
+
+        # Close assistant turn
+        print(dim("─" * 50))
 
         if not args.no_tts and answer.strip():
             print(f"  {dim('🔊 Speaking...')}", end="", flush=True)
@@ -666,7 +765,7 @@ def cmd_completions(args: Any) -> None:
             COMPREPLY=( $(compgen -W "-d --device --duration -t --thread -V --voice --no-tts --no-vad --list" -- ${cur}) )
             ;;
         threads)
-            COMPREPLY=( $(compgen -W "--new --delete --show" -- ${cur}) )
+            COMPREPLY=( $(compgen -W "--new --delete --show --rename --title" -- ${cur}) )
             ;;
         memory)
             COMPREPLY=( $(compgen -W "add search list clear" -- ${cur}) )
@@ -675,7 +774,7 @@ def cmd_completions(args: Any) -> None:
             COMPREPLY=( $(compgen -W "transcribe speak status" -- ${cur}) )
             ;;
         ollama)
-            COMPREPLY=( $(compgen -W "models pull whoami signin" -- ${cur}) )
+            COMPREPLY=( $(compgen -W "models running pull rm stop signin signout status" -- ${cur}) )
             ;;
         intent)
             COMPREPLY=( $(compgen -W "stats export" -- ${cur}) )
@@ -710,7 +809,6 @@ _aishe() {
         'memory:Memory management'
         'voice:Voice input/output'
         'ollama:Ollama model management'
-        'intent:Intent lab'
         'config:View/edit configuration'
         'doctor:Run diagnostics'
         'search:Search threads and memory'
@@ -734,13 +832,12 @@ complete -c aishe -a "threads" -d "Manage chat threads"
 complete -c aishe -a "memory" -d "Memory management"
 complete -c aishe -a "voice" -d "Voice input/output"
 complete -c aishe -a "ollama" -d "Ollama model management"
-complete -c aishe -a "intent" -d "Intent lab"
 complete -c aishe -a "config" -d "View/edit configuration"
 complete -c aishe -a "doctor" -d "Run diagnostics"
 complete -c aishe -a "search" -d "Search threads and memory"
 complete -c aishe -a "export" -d "Export data"
 complete -c aishe -a "version" -d "Show version"
-complete -c aishe -a "completions" -d "Generate shell completions"
+complete -c aishe -a "completions" -d "Generate shell completion scripts"
 complete -c aishe -a "pet" -d "Your terminal blob pet"
 """)
     else:
@@ -892,6 +989,8 @@ def main() -> None:
     p_threads.add_argument("--new", action="store_true", help="Create a new thread")
     p_threads.add_argument("--delete", metavar="ID", help="Delete a thread")
     p_threads.add_argument("--show", metavar="ID", help="Show thread messages")
+    p_threads.add_argument("--rename", metavar="ID", help="Rename a thread")
+    p_threads.add_argument("--title", nargs="*", help="New title (use with --rename)")
 
     # memory
     p_mem = sub.add_parser("memory", help="Memory management")
@@ -909,8 +1008,8 @@ def main() -> None:
 
     # ollama
     p_ollama = sub.add_parser("ollama", help="Ollama model management")
-    p_ollama.add_argument("action", choices=["models", "pull", "whoami", "signin"], help="Ollama action")
-    p_ollama.add_argument("model", nargs="?", help="Model name (for pull)")
+    p_ollama.add_argument("action", choices=["models", "running", "pull", "rm", "stop", "signin", "signout", "status"], help="Ollama action")
+    p_ollama.add_argument("model", nargs="?", help="Model name (for pull/rm/stop)")
 
     # intent
     p_intent = sub.add_parser("intent", help="Intent lab")

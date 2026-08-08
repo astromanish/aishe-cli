@@ -87,14 +87,19 @@ class BlobParams:
     orbit_radius: float = 0.45    # fraction of half-width
     orbit_speed: float = 0.12     # radians per frame
     wobble: float = 0.08
-    # Palette: list of (r, g, b) tuples, low → high field intensity
+    # Palette: list of (r, g, b) tuples, low → high field intensity.
+    # Constrained to shades of black/white + Indian flag colors
+    # (saffron #FF9933, white #FFFFFF, green #138808, Ashoka Chakra navy #000080).
+    # This is the default palette used by idle / listening / speaking /
+    # greeting states — a Tiranga gradient: black → navy → saffron → white
+    # → green → white.
     palette: List[Tuple[int, int, int]] = field(default_factory=lambda: [
-        (12, 18, 28),      # dark core
-        (40, 60, 110),     # deep blue
-        (90, 130, 180),    # blue
-        (180, 150, 90),    # amber
-        (220, 180, 90),    # warm amber
-        (240, 210, 130),   # highlight
+        (0, 0, 0),         # black core
+        (0, 0, 80),        # chakra navy
+        (255, 153, 51),    # India saffron
+        (255, 255, 255),   # white
+        (19, 136, 8),      # India green
+        (255, 255, 255),   # white highlight
     ])
     seed: int = 0
 
@@ -275,14 +280,15 @@ def static_frame(
     elif state == "error":
         params.n_points = 5
         params.wobble = 0.25
-        # Asymmetric palette — pull toward red
+        # Error palette — saffron stands in for "warning" (courage/sacrifice
+        # in the flag's symbolism). Stays within B/W + Indian flag colors.
         params.palette = [
-            (20, 8, 8),
-            (90, 30, 30),
-            (160, 60, 50),
-            (210, 120, 80),
-            (230, 170, 100),
-            (240, 210, 130),
+            (0, 0, 0),         # black
+            (40, 30, 12),      # deep saffron shadow (B/W + saffron mix)
+            (160, 96, 32),     # darkened saffron
+            (255, 153, 51),    # India saffron
+            (255, 230, 200),   # saffron-tinted white
+            (255, 255, 255),   # white
         ]
     elif state == "listening":
         params.n_points = 10
