@@ -6,15 +6,16 @@ persistent memory, chat threads, tool calling, and live voice
 conversation — all from your terminal.
 
 Usage:
-  aishe status                 — check all services
-  aishe chat "hello"           — one-shot chat
-  aishe stream "hello"         — streaming chat (tokens printed live)
+  aishe                        — interactive streaming chat (or one-shot with a message)
+  aishe "hello"                — one-shot streaming chat
   aishe live                   — live voice conversation
+  aishe status                 — check all services
   aishe doctor                 — run diagnostics
   aishe config                 — view/edit config
   aishe version                — show version
   aishe memory add "fact"      — manage memory
 
+Data lives in ~/aishe on every platform.
 Requirements: Python 3.9+, requests (pip install requests)
 """
 

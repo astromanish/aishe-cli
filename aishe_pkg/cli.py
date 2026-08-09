@@ -37,55 +37,11 @@ from .voice import (
 DEEPAGENT_URL = get("services.deepagent", "http://localhost:8765")
 
 
-# ─── Chat ───────────────────────────────────────────────────────────────────
-
-def cmd_chat(args: Any) -> None:
-    msg = " ".join(args.message) if isinstance(args.message, list) else args.message
-    if not msg:
-        msg = sys.stdin.read().strip()
+def _stream_once(msg: str, tid: str) -> None:
+    """Send one message and stream the reply. Persists both turns."""
     if not msg:
         print(red("No message provided"))
         sys.exit(1)
-
-    tid = args.thread or "cli"
-
-    # Ensure thread exists and save user message
-    thr_add_message(tid, "user", msg)
-
-    try:
-        r = requests.post(
-            f"{DEEPAGENT_URL}/invoke",
-            json={"message": msg, "thread_id": tid},
-            timeout=120,
-        )
-        r.raise_for_status()
-        data = r.json()
-    except requests.exceptions.ConnectionError:
-        print(red("Cannot reach DeepAgent on :8765. Is the sidecar running?"))
-        sys.exit(1)
-    except Exception as e:
-        print(red(f"Error: {e}"))
-        sys.exit(1)
-
-    answer = data.get("answer", "")
-    print(answer)
-    if answer:
-        thr_add_message(tid, "assistant", answer)
-    if args.verbose:
-        print(dim(f"\n─ stats: {data.get('steps', '?')} steps, {len(data.get('tool_calls', []))} tool calls"))
-        for tc in data.get("tool_calls", []):
-            print(dim(f"  tool: {tc['name']}({json.dumps(tc['args'], ensure_ascii=False)})"))
-
-
-def cmd_stream(args: Any) -> None:
-    msg = " ".join(args.message) if isinstance(args.message, list) else args.message
-    if not msg:
-        msg = sys.stdin.read().strip()
-    if not msg:
-        print(red("No message provided"))
-        sys.exit(1)
-
-    tid = args.thread or "cli"
 
     # Ensure thread exists and save user message
     thr_add_message(tid, "user", msg)
@@ -118,7 +74,7 @@ def cmd_stream(args: Any) -> None:
         elif etype == "tool_call":
             print(yellow(f"\n  [tool: {ev.get('name', '?')}]"), flush=True)
         elif etype == "tool_result":
-            print(dim(f"  [result: {ev.get('result', '')[:100]}]"), flush=True)
+            print(dim(f"  [result: {ev.get('result', '')[:100]}]\n"), flush=True)
         elif etype == "final":
             if not answer:
                 answer = ev.get("answer", "")
@@ -127,6 +83,46 @@ def cmd_stream(args: Any) -> None:
     else:
         thr_add_message(tid, "assistant", answer)
     print()
+
+
+# ─── Bare `aishe` — one-shot or interactive streaming ──────────────────────
+
+def cmd_repl_stream(args: Any) -> None:
+    """Bare `aishe`: with a message → one-shot stream; without → interactive loop."""
+    if not check(f"{DEEPAGENT_URL}/health"):
+        print(red("DeepAgent is down on :8765"))
+        sys.exit(1)
+
+    tid = getattr(args, "thread", None) or "cli"
+
+    # One-shot: message provided as arg, or piped via stdin (non-TTY)
+    msg = " ".join(args.message) if isinstance(getattr(args, "message", None), list) else getattr(args, "message", "")
+    if not msg and not sys.stdin.isatty():
+        msg = sys.stdin.read().strip()
+    if msg:
+        _stream_once(msg, tid)
+        return
+
+    # Interactive loop
+    print(bold("💬 Aishe — streaming chat"))
+    print(dim("Type a message and press Enter. Ctrl+C or /exit to quit."))
+    print(dim("─" * 50))
+
+    while True:
+        try:
+            user_input = input(bold("\nYou ▶ ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{dim('Goodbye!')}")
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() in ("/exit", "/quit"):
+            print(dim("Goodbye!"))
+            break
+
+        _stream_once(user_input, tid)
+        print(dim("─" * 50))
 
 
 # ─── Live Voice ──────────────────────────────────────────────────────────────
@@ -468,9 +464,8 @@ def main() -> None:
         description="Aishe CLI — voice-first AI assistant for your terminal",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  aishe status
-  aishe chat "What is 2+2?"
-  aishe stream "Tell me a joke"
+  aishe                         — interactive streaming chat
+  aishe "Tell me a joke"        — one-shot streaming chat
   aishe live                    — live voice conversation
   aishe doctor                  — run diagnostics
   aishe config                  — view config
@@ -479,21 +474,20 @@ def main() -> None:
 """,
     )
 
+    # Bare `aishe` accepts an optional message (one-shot) or none (interactive).
+    # Intercept before argparse: if the first arg isn't a known subcommand,
+    # treat everything as a message.
+    _KNOWN = {"status", "live", "memory", "config", "doctor", "version", "-h", "--help"}
+    _argv = sys.argv[1:]
+    if _argv and _argv[0] not in _KNOWN:
+        msg = " ".join(_argv)
+        _stream_once(msg, "cli")
+        return
+
     sub = parser.add_subparsers(dest="command")
 
     # status
     sub.add_parser("status", help="Check all service statuses")
-
-    # chat
-    p_chat = sub.add_parser("chat", help="One-shot chat via DeepAgent")
-    p_chat.add_argument("message", nargs="*", help="Message to send (or pipe via stdin)")
-    p_chat.add_argument("-t", "--thread", default="cli", help="Thread ID")
-    p_chat.add_argument("-v", "--verbose", action="store_true", help="Show tool calls")
-
-    # stream
-    p_stream = sub.add_parser("stream", help="Streaming chat (tokens printed live)")
-    p_stream.add_argument("message", nargs="*", help="Message to send (or pipe via stdin)")
-    p_stream.add_argument("-t", "--thread", default="cli", help="Thread ID")
 
     # live
     p_live = sub.add_parser("live", help="Live voice conversation (record → STT → think → TTS)")
@@ -524,9 +518,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Bare `aishe` (no subcommand) → one-shot (with message) or interactive loop
     if not args.command:
-        parser.print_help()
-        sys.exit(0)
+        cmd_repl_stream(args)
+        return
 
     # Handle --list for live before dispatch
     if args.command == "live" and hasattr(args, "list") and args.list:
@@ -573,8 +568,6 @@ def main() -> None:
 
     dispatch: Dict[str, Any] = {
         "status": cmd_status,
-        "chat": cmd_chat,
-        "stream": cmd_stream,
         "live": cmd_live,
         "memory": cmd_memory,
         "doctor": cmd_doctor,

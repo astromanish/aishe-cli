@@ -664,20 +664,8 @@ esac
 # ── 11. Config directory ───────────────────────────────────
 echo -e "\n  ${BOLD}11. Configuration${NC}"
 
-case "$OS_NAME" in
-    macOS)
-        CONFIG_DIR="${HOME}/.config/aishe"
-        DEFAULT_DATA_DIR="${HOME}/Library/Application Support/aishe"
-        ;;
-    Windows)
-        CONFIG_DIR="${HOME}/.config/aishe"
-        DEFAULT_DATA_DIR="${HOME}/AppData/Local/aishe"
-        ;;
-    *)
-        CONFIG_DIR="${HOME}/.config/aishe"
-        DEFAULT_DATA_DIR="${HOME}/.local/share/aishe"
-        ;;
-esac
+CONFIG_DIR="${HOME}/.config/aishe"
+DEFAULT_DATA_DIR="${HOME}/aishe"
 
 mkdir -p "$CONFIG_DIR"
 
@@ -726,7 +714,7 @@ echo ""
 echo -e "  ${CYAN}Next steps:${NC}"
 echo -e "  1. Run: ${CYAN}aishe status${NC}"
 echo ""
-echo -e "  2. Start chatting: ${CYAN}aishe chat \"Hello!\"${NC}"
+echo -e "  2. Start chatting: ${CYAN}aishe${NC}"
 echo -e "     Or go live:      ${CYAN}aishe live${NC}"
 echo ""
 if [ "${AISHE_INSTALL_VOICE:-0}" != "1" ]; then

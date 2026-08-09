@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import sys
-import platform
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -17,13 +16,8 @@ except ImportError:
 # ─── Platform paths ─────────────────────────────────────────
 
 def _default_data_dir() -> str:
-    """Platform-appropriate data directory."""
-    system = platform.system()
-    if system == "Darwin":
-        return str(Path.home() / "Library" / "Application Support" / "aishe")
-    elif system == "Windows":
-        return str(Path.home() / "AppData" / "Local" / "aishe")
-    return str(Path.home() / ".local" / "share" / "aishe")
+    """Data directory — always `~/aishe` on every platform."""
+    return str(Path.home() / "aishe")
 
 
 def _default_config_dir() -> Path:

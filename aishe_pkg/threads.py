@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import get
 
-DATA_DIR = Path(get("data.dir", str(Path.home() / ".local" / "share" / "aishe")))
+DATA_DIR = Path(get("data.dir", str(Path.home() / "aishe")))
 THREADS_DIR = DATA_DIR / "threads"
 
 
