@@ -1,6 +1,6 @@
 # Aishe CLI
 
-Voice-first AI assistant for your terminal — streaming chat, live voice, and persistent memory.
+Privacy-first AI assistant for your terminal — streaming chat, live voice, and persistent memory.
 
 ## Install
 
