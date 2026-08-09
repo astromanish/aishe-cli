@@ -22,11 +22,41 @@ aishe memory clear       # clear memory
 aishe config             # view config
 aishe config get <key>   # get a config value
 aishe config set <k> <v> # set a config value
+aishe setup              # choose your Ollama model + optional Telegram setup
+aishe telegram status    # Telegram bridge status
+aishe telegram auth <token>  # save bot token
+aishe gateway start      # start the Telegram connection bridge
+aishe gateway restart    # restart the Telegram bridge
+aishe gateway stop       # stop the Telegram bridge
 aishe doctor             # run diagnostics
 aishe version            # show version
 ```
 
 In the interactive loop, use `/exit` or Ctrl+C to quit.
+
+`aishe setup` lists your pulled Ollama models, lets you pick one (or type a
+new model name to pull), saves it, restarts DeepAgent to apply it, and
+optionally walks you through connecting Telegram (bot token + your user id).
+
+### Telegram bridge
+
+Chat with Aishe from Telegram:
+
+1. Get a bot token from **@BotFather** (`/newbot`).
+2. Run `aishe setup` and choose "yes" for the Telegram bridge, or:
+   ```bash
+   aishe telegram auth <bot_token>
+   ```
+3. Add your Telegram user id (get it from @userinfobot) via the setup prompt.
+4. Start the bridge:
+   ```bash
+   aishe gateway start
+   aishe gateway status   # verify it's running
+   ```
+5. Message your bot on Telegram — Aishe replies via DeepAgent. Each chat keeps
+   its own conversation in `~/aishe/threads/`.
+
+Manage it anytime with `aishe gateway start|restart|stop|status`.
 
 ## Requirements
 

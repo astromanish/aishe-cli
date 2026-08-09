@@ -12,6 +12,10 @@ Usage:
   aishe status                 — check all services
   aishe doctor                 — run diagnostics
   aishe config                 — view/edit config
+  aishe setup                  — choose your Ollama model + optional Telegram
+  aishe telegram status        — Telegram bridge status
+  aishe telegram auth <token>  — save bot token
+  aishe gateway start|restart  — start/restart the Telegram bridge
   aishe version                — show version
   aishe memory add "fact"      — manage memory
 

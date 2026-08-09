@@ -11,7 +11,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -456,6 +456,265 @@ def cmd_version(args: Any) -> None:
         pass
 
 
+# ─── Setup ──────────────────────────────────────────────────────────────────
+
+def cmd_setup(args: Any) -> None:
+    """Interactive setup — pick an Ollama model, pull it, apply it, restart DeepAgent."""
+    from .config import get as cfg_get, set_key as cfg_set
+    from .util import check as util_check
+
+    ollama_url = cfg_get("services.ollama", "http://localhost:11434")
+    current = cfg_get("model", "qwen2.5:3b")
+
+    header("Aishe Setup", "Choose your Ollama model")
+
+    # 1. List available models
+    section("Available Models")
+    models: List[str] = []
+    if util_check(f"{ollama_url}/api/tags"):
+        try:
+            r = requests.get(f"{ollama_url}/api/tags", timeout=5)
+            models = sorted(m["name"] for m in r.json().get("models", []))
+        except Exception:
+            models = []
+        if models:
+            for m in models:
+                marker = "●" if m == current else "○"
+                print(f"  {marker} {cyan(m)}")
+            print(dim(f"\n  Current: {current}"))
+        else:
+            print(dim("  No models pulled yet."))
+    else:
+        print(red("  Ollama is not reachable. Is it running?"))
+        sys.exit(1)
+
+    # 2. Choose a model
+    section("Choose Model")
+    if models:
+        print("  Pick a number or type a model name (e.g. llama3.2, qwen2.5:7b):")
+        for i, m in enumerate(models, 1):
+            print(f"    [{i}] {m}")
+        try:
+            choice = input(bold("\n  Model ▶ ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print(red("\n  Setup cancelled."))
+            sys.exit(1)
+    else:
+        try:
+            choice = input(bold("  Model name to pull ▶ ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print(red("\n  Setup cancelled."))
+            sys.exit(1)
+
+    selected = None
+    if choice.isdigit() and 1 <= int(choice) <= len(models):
+        selected = models[int(choice) - 1]
+    elif choice:
+        selected = choice.strip()
+    else:
+        selected = current
+
+    if selected != current:
+        section("Pull Model")
+        print(f"  Pulling {cyan(selected)}...")
+        subprocess.run(["ollama", "pull", selected])
+        print(f"  {green('✓')} {selected} available")
+
+    # 3. Save to config
+    section("Save")
+    cfg_set("model", selected)
+    print(f"  {green('✓')} Saved model: {cyan(selected)}")
+
+    # 4. Restart DeepAgent to apply the model
+    section("Restart DeepAgent")
+    print("  Restarting DeepAgent to apply the model...")
+    # Locate the sidecar
+    deepagent_dir = os.path.expanduser("~/.local/share/aishe-cli/deepagent")
+    server_py = os.path.join(deepagent_dir, "server.py")
+    venv_py = os.path.join(deepagent_dir, ".venv", "bin", "python")
+
+    if os.path.exists(server_py) and os.path.exists(venv_py):
+        # Stop the running DeepAgent by matching its working directory (avoids
+        # killing the STT sidecar, whose cmdline is also `server.py`).
+        try:
+            lsof = subprocess.run(
+                ["lsof", "-t", f"+d", deepagent_dir],
+                capture_output=True, text=True, timeout=5,
+            )
+            pids = [p for p in lsof.stdout.split() if p]
+            for pid in pids:
+                cmd = subprocess.run(
+                    ["ps", "-p", pid, "-o", "command="],
+                    capture_output=True, text=True,
+                ).stdout
+                if "server.py" in cmd:
+                    subprocess.run(["kill", pid], check=False)
+        except Exception:
+            pass
+
+        env = dict(os.environ)
+        env["AISHE_MODEL"] = selected
+        env["AISHE_OLLAMA_URL"] = f"{ollama_url}/v1"
+        env["AISHE_API_KEY"] = "ollama"
+        subprocess.Popen(
+            [venv_py, server_py],
+            stdout=open("/tmp/deepagent.log", "a"),
+            stderr=subprocess.STDOUT,
+            cwd=deepagent_dir,
+            env=env,
+        )
+        for _ in range(20):
+            if util_check(f"{cfg_get('services.deepagent', 'http://localhost:8765')}/health"):
+                break
+            import time as _t
+            _t.sleep(1)
+        print(f"  {green('✓')} DeepAgent restarted with {cyan(selected)}")
+    else:
+        print(yellow("  DeepAgent sidecar not found — model saved, will apply on next start."))
+
+    print()
+    print(f"  {green(bold('✓ Setup complete'))}  Model: {cyan(selected)}")
+
+    # 5. Telegram bridge (optional)
+    section("Telegram Bridge")
+    from .config import get as cfg_get
+    have_token = bool(cfg_get("telegram.token", ""))
+    print(f"  Telegram: {green('configured') if have_token else red('not configured')}")
+    try:
+        want = input(bold("  Set up Telegram bridge? (y/N) ▶ ")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        want = "n"
+    if want in ("y", "yes"):
+        _setup_telegram()
+
+
+# ─── Telegram bridge ───────────────────────────────────────────────────────
+
+def _setup_telegram() -> None:
+    """Interactive Telegram setup: bot token + allowed user id."""
+    from .config import get as cfg_get, set_key as cfg_set
+
+    print("  To get a bot token: message @BotFather on Telegram and run /newbot.")
+    try:
+        token = input(bold("  Bot token ▶ ")).strip()
+    except (EOFError, KeyboardInterrupt):
+        print(red("  Telegram setup cancelled."))
+        return
+    if token:
+        cfg_set("telegram.token", token)
+        print(f"  {green('✓')} Bot token saved.")
+
+    print("  To find your user id: message @userinfobot on Telegram and copy the number.")
+    try:
+        uid = input(bold("  Your Telegram user id ▶ ")).strip()
+    except (EOFError, KeyboardInterrupt):
+        uid = ""
+    if uid.isdigit():
+        existing = list(cfg_get("telegram.allowed_users", []) or [])
+        if int(uid) not in existing:
+            existing.append(int(uid))
+        cfg_set("telegram.allowed_users", ",".join(str(u) for u in existing))
+        print(f"  {green('✓')} Allowed user {uid} added.")
+
+    print(f"  Start the bridge anytime with: {cyan('aishe gateway start')}")
+
+
+def _telegram_bot_path() -> str:
+    """Locate telegram_bot.py — in the repo clone or the installed sidecars dir."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sidecars", "telegram_bot.py"),
+        os.path.expanduser("~/.local/share/aishe-cli/sidecars/telegram_bot.py"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+
+def _telegram_pid() -> Optional[str]:
+    """Return the running telegram bridge PID, or None."""
+    import subprocess as _sp
+    try:
+        out = _sp.run(["pgrep", "-f", "telegram_bot.py"], capture_output=True, text=True).stdout.strip()
+        pids = [p for p in out.split() if p]
+        return pids[0] if pids else None
+    except Exception:
+        return None
+
+
+def cmd_telegram(args: Any) -> None:
+    """Manage the Telegram bridge."""
+    from .config import get as cfg_get, set_key as cfg_set
+
+    action = getattr(args, "tg_action", None)
+
+    if action == "auth":
+        token = getattr(args, "token", "") or ""
+        cfg_set("telegram.token", token)
+        print(f"  {green('✓')} Bot token saved.")
+        return
+
+    if action == "status":
+        pid = _telegram_pid()
+        token = cfg_get("telegram.token", "")
+        if pid:
+            print(f"  {green('●')} Telegram bridge running (PID {pid})")
+        else:
+            print(f"  {red('○')} Telegram bridge not running")
+        print(f"  Token: {cyan('set') if token else red('not set')}")
+        print(f"  Allowed users: {cyan(str(cfg_get('telegram.allowed_users', [])))}")
+        return
+
+    if action == "start" or action == "restart":
+        _telegram_stop()
+        token = cfg_get("telegram.token", "")
+        if not token:
+            print(red("  No bot token set. Run: aishe setup (Telegram section) or aishe telegram auth <token>"))
+            sys.exit(1)
+        bot_path = _telegram_bot_path()
+        log_file = cfg_get("telegram.log_file", "~/aishe/telegram.log")
+        log_file = os.path.expanduser(log_file)
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        env = dict(os.environ)
+        env["AISHE_TELEGRAM_TOKEN"] = token
+        subprocess.Popen(
+            [sys.executable, bot_path],
+            stdout=open(log_file, "a"),
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+        # Wait briefly for it to come up
+        import time as _t
+        for _ in range(10):
+            if _telegram_pid():
+                break
+            _t.sleep(0.5)
+        print(f"  {green('✓')} Telegram bridge {'restarted' if action == 'restart' else 'started'}. Log: {dim(log_file)}")
+        return
+
+    if action == "stop":
+        _telegram_stop()
+        print(f"  {green('✓')} Telegram bridge stopped.")
+        return
+
+
+def _telegram_stop() -> None:
+    pid = _telegram_pid()
+    if pid:
+        subprocess.run(["kill", pid], check=False)
+
+
+def cmd_gateway(args: Any) -> None:
+    """Gateway control — start/restart/stop/status for the Telegram bridge."""
+    action = getattr(args, "gw_action", None)
+    if action in ("start", "restart"):
+        cmd_telegram(type("A", (), {"tg_action": action})())
+    elif action == "stop":
+        cmd_telegram(type("A", (), {"tg_action": "stop"})())
+    else:  # status
+        cmd_telegram(type("A", (), {"tg_action": "status"})())
+
+
 # ─── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -477,7 +736,7 @@ def main() -> None:
     # Bare `aishe` accepts an optional message (one-shot) or none (interactive).
     # Intercept before argparse: if the first arg isn't a known subcommand,
     # treat everything as a message.
-    _KNOWN = {"status", "live", "memory", "config", "doctor", "version", "-h", "--help"}
+    _KNOWN = {"status", "live", "memory", "config", "doctor", "version", "setup", "telegram", "gateway", "-h", "--help"}
     _argv = sys.argv[1:]
     if _argv and _argv[0] not in _KNOWN:
         msg = " ".join(_argv)
@@ -512,6 +771,18 @@ def main() -> None:
 
     # doctor
     sub.add_parser("doctor", help="Run comprehensive diagnostics")
+
+    # setup
+    sub.add_parser("setup", help="Choose your Ollama model and restart DeepAgent")
+
+    # telegram
+    p_tg = sub.add_parser("telegram", help="Manage the Telegram bridge")
+    p_tg.add_argument("tg_action", nargs="?", choices=["auth", "start", "stop", "restart", "status"], help="Telegram action")
+    p_tg.add_argument("token", nargs="?", help="Bot token (for auth)")
+
+    # gateway
+    p_gw = sub.add_parser("gateway", help="Start/restart/stop the Telegram connection bridge")
+    p_gw.add_argument("gw_action", nargs="?", choices=["start", "stop", "restart", "status"], help="Gateway action")
 
     # version
     sub.add_parser("version", help="Show version information")
@@ -571,6 +842,9 @@ def main() -> None:
         "live": cmd_live,
         "memory": cmd_memory,
         "doctor": cmd_doctor,
+        "setup": cmd_setup,
+        "telegram": cmd_telegram,
+        "gateway": cmd_gateway,
         "version": cmd_version,
     }
 

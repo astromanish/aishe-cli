@@ -35,6 +35,7 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 # ─── Defaults ───────────────────────────────────────────────
 
 DEFAULT_CONFIG: Dict[str, Any] = {
+    "model": "qwen2.5:3b",
     "services": {
         "deepagent": "http://localhost:8765",
         "ollama": "http://localhost:11434",
@@ -51,6 +52,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "data": {
         "dir": _default_data_dir(),
+    },
+    "telegram": {
+        "token": "",
+        "allowed_users": [],
+        "allow_all": False,
+        "log_file": str(Path.home() / "aishe" / "telegram.log"),
     },
     "ui": {
         "color": True,
