@@ -9,25 +9,11 @@ Usage:
   aishe status                 — check all services
   aishe chat "hello"           — one-shot chat
   aishe stream "hello"         — streaming chat (tokens printed live)
-  aishe repl                   — continuous text REPL
   aishe live                   — live voice conversation
   aishe doctor                 — run diagnostics
-  aishe search "query"         — search threads + memory
-  aishe export                 — export all data
   aishe config                 — view/edit config
   aishe version                — show version
-  aishe completions bash       — generate shell completions
-  aishe threads                — manage threads
   aishe memory add "fact"      — manage memory
-  aishe voice transcribe <wav> — voice I/O
-  aishe ollama models          — list pulled models
-  aishe ollama running         — list running models
-  aishe ollama pull gemma4     — download a model
-  aishe ollama rm gemma4       — remove a model
-  aishe ollama stop gemma4     — stop a running model
-  aishe ollama signin          — sign in to ollama.com
-  aishe ollama signout         — sign out from ollama.com
-  aishe ollama status          — server + model summary
 
 Requirements: Python 3.9+, requests (pip install requests)
 """

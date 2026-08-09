@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import os
 import platform
 import re
 import subprocess
-import sys
 import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import requests
 
 from .config import get
-from .util import bold, check, cyan, dim, green, red, yellow
+from .util import check, dim
 
 STT_URL = get("services.stt", "http://localhost:5093")
 TTS_URL = get("services.tts", "http://localhost:8766")
@@ -310,52 +307,3 @@ def record_with_vad(
         wf.writeframes(b"".join(audio_chunks))
 
     return True
-
-
-# ─── CLI handlers ───────────────────────────────────────────────────────────
-
-def cmd_voice(args: Any) -> None:
-    action = args.action
-
-    if action == "status":
-        stt_ok = stt_health()
-        tts_ok = tts_health()
-        print(bold("Voice Services"))
-        print(f"  Parakeet STT  :5093  {green('✓ UP') if stt_ok else red('✗ DOWN')}")
-        print(f"  Supertonic TTS :8766  {green('✓ UP') if tts_ok else red('✗ DOWN')}")
-        return
-
-    if action == "transcribe":
-        path = args.file
-        if not path or not os.path.exists(path):
-            print(red(f"Audio file not found: {path}"))
-            sys.exit(1)
-        try:
-            text = transcribe(path)
-        except requests.exceptions.ConnectionError:
-            print(red("Cannot reach Parakeet STT on :5093"))
-            sys.exit(1)
-        print(text)
-        return
-
-    if action == "speak":
-        parts: List[str] = []
-        if args.file:
-            parts.append(args.file)
-        if args.text:
-            parts.extend(args.text)
-        text = " ".join(parts)
-        if not text:
-            text = sys.stdin.read().strip()
-        if not text:
-            print(red("No text provided"))
-            sys.exit(1)
-        voice = args.voice or get("voice.default_voice", "F4")
-        try:
-            outpath = synthesize(text, voice=voice, play=not args.no_play)
-        except requests.exceptions.ConnectionError:
-            print(red("Cannot reach Supertonic TTS on :8766"))
-            sys.exit(1)
-        if outpath:
-            print(f"{green('Synthesized')} → {outpath}")
-        return

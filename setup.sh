@@ -708,7 +708,7 @@ fi
 
 # ── 12. Data directories ───────────────────────────────────
 echo -e "\n  ${BOLD}12. Data Directories${NC}"
-mkdir -p "${DEFAULT_DATA_DIR}/memory" "${DEFAULT_DATA_DIR}/threads" "${DEFAULT_DATA_DIR}/intent_lab"
+mkdir -p "${DEFAULT_DATA_DIR}/memory" "${DEFAULT_DATA_DIR}/threads"
 pass "Created data directories at ${DEFAULT_DATA_DIR}"
 
 # ── Done ───────────────────────────────────────────────────
@@ -733,6 +733,6 @@ if [ "${AISHE_INSTALL_VOICE:-0}" != "1" ]; then
 echo -e "  ${CYAN}Enable voice (STT+TTS) anytime:${NC}"
 echo -e "     ${CYAN}AISHE_INSTALL_VOICE=1 bash ${SCRIPT_SRC}/setup.sh${NC}"
 echo -e "  ${DIM}This downloads Kokoro TTS (~350 MB) + faster-whisper STT.${NC}"
-echo -e "  ${DIM}After that: aishe voice speak 'hello' and aishe voice transcribe <file> work.${NC}"
+echo -e "  ${DIM}After that: aishe live works with full voice.${NC}"
 echo ""
 fi

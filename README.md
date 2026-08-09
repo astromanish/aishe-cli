@@ -19,9 +19,6 @@ aishe live
 - **Memory** — persistent personal memory. The AI remembers facts about you across sessions
 - **Threads** — multiple conversation threads with history
 - **Voice I/O** — transcribe audio files, synthesize text to speech
-- **Pet** — your aishe blob. A real-time terminal pet that reflects your activity (idle, thinking, listening, speaking, error). Grows with usage, unlocks milestones, has persistent state.
-- **Ollama Integration** — list, pull, and manage models
-- **Intent Lab** — log and analyze user intent classification stats
 - **Diagnostics** — comprehensive system check with roundtrip tests
 - **Export** — export memory and threads to Markdown/CSV
 - **Search** — full-text search across all threads and memory
@@ -148,69 +145,6 @@ aishe voice speak "Namaste, main Aishe hoon"
 aishe voice speak "Hello" -o output.wav --no-play
 ```
 
-### Pet — your aishe blob
-```bash
-aishe pet                       # foreground animated blob in your terminal
-aishe pet status                # one-shot frame
-aishe pet status --mood thinking  # render a specific mood
-aishe pet inspect               # dump all pet state as JSON (debug-friendly)
-aishe pet signal --state listening  # poke the pet's mood from any process
-aishe pet milestones            # list all milestones
-aishe pet enable / disable      # toggle the pet
-aishe pet reset                 # wipe pet state + signals
-```
-
-The pet is a real-time metaball rendered in your terminal. Its mood reflects
-what's happening: `idle` (gentle pulse), `thinking` (denser core while the
-LLM is working), `listening` (elongated while recording), `speaking` (squashed
-during TTS), `error` (asymmetric twitch). It grows with usage, tracks your
-streak, and unlocks milestones like `first_chat`, `ten_chats`, `streak_7`.
-
-State lives in `~/Library/Application Support/aishe/pet/state.json` (macOS) or
-`~/.local/share/aishe/pet/` (Linux). Signals are written to a JSONL log that
-the foreground pet tails — so any `aishe` subcommand can poke the pet's mood
-from a separate process.
-
-#### Run the pet around the system
-
-The pet can attach as a **persistent tmux side-pane** so it stays alive in
-the corner of your terminal while you work in the main pane:
-
-```bash
-# Inside any tmux session:
-aishe pet attach                    # split right, 30% width
-aishe pet attach --direction bottom # split below
-aishe pet attach --ratio 25         # narrower pet pane
-aishe pet detach                    # remove the pet pane
-
-# Outside tmux (macOS only) — opens a separate Terminal.app/iTerm2 window:
-aishe pet attach --window
-```
-
-The pet in the side-pane reacts in real time to whatever you run in the
-main pane (`aishe chat`, `aishe live`, etc.) — same signal channel, just a
-different render target. State writes are serialized with `flock` so the
-foreground pet and command handlers don't clobber each other.
-
-#### Persistent tmux hook
-
-Auto-attach a pet pane in every new tmux window:
-
-```bash
-aishe pet watch install     # adds a hook to ~/.tmux.conf
-aishe pet watch status      # check if the hook is active
-aishe pet watch uninstall   # remove the hook
-tmux source-file ~/.tmux.conf
-```
-
-### Ollama
-```bash
-aishe ollama models
-aishe ollama pull deepseek-v4-flash:cloud
-aishe ollama whoami
-aishe ollama signin
-```
-
 ### Diagnostics
 ```bash
 aishe doctor
@@ -264,7 +198,6 @@ The CLI talks to four local services:
 All data is local:
 - **Memory**: `~/Library/Application Support/aishe/memory/facts.jsonl`
 - **Threads**: `~/Library/Application Support/aishe/threads/*.json`
-- **Intent Logs**: `~/Library/Application Support/aishe/intent_lab/intent_*.jsonl`
 - **Config**: `~/.config/aishe/config.yaml`
 
 ## Extending

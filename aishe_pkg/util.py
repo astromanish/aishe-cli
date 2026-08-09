@@ -118,7 +118,7 @@ def welcome() -> None:
     print(f"  {bold('│')}  {dim('Voice-first AI for your terminal')}    {bold('│')}")
     print(f"  {bold('╰──────────────────────────────────────────╯')}")
     print()
-    print(f"  {dim('Try: aishe pet · aishe status · aishe live')}")
+    print(f"  {dim('Try: aishe status · aishe chat · aishe live')}")
     print()
 
 
