@@ -33,6 +33,7 @@ from .voice import (
     tts_health,
     tts_info,
 )
+from .dashboard import cmd_dashboard
 
 DEEPAGENT_URL = get("services.deepagent", "http://localhost:8765")
 
@@ -736,7 +737,7 @@ def main() -> None:
     # Bare `aishe` accepts an optional message (one-shot) or none (interactive).
     # Intercept before argparse: if the first arg isn't a known subcommand,
     # treat everything as a message.
-    _KNOWN = {"status", "live", "memory", "config", "doctor", "version", "setup", "telegram", "gateway", "-h", "--help"}
+    _KNOWN = {"status", "live", "memory", "config", "doctor", "version", "setup", "telegram", "gateway", "dashboard", "-h", "--help"}
     _argv = sys.argv[1:]
     if _argv and _argv[0] not in _KNOWN:
         msg = " ".join(_argv)
@@ -783,6 +784,12 @@ def main() -> None:
     # gateway
     p_gw = sub.add_parser("gateway", help="Start/restart/stop the Telegram connection bridge")
     p_gw.add_argument("gw_action", nargs="?", choices=["start", "stop", "restart", "status"], help="Gateway action")
+
+    # dashboard
+    p_dash = sub.add_parser("dashboard", help="Open the local web config dashboard")
+    p_dash.add_argument("--port", type=int, default=8767, help="Port (default 8767)")
+    p_dash.add_argument("--host", default="127.0.0.1", help="Host (default 127.0.0.1)")
+    p_dash.add_argument("--open", action="store_true", help="Open browser automatically")
 
     # version
     sub.add_parser("version", help="Show version information")
@@ -845,6 +852,7 @@ def main() -> None:
         "setup": cmd_setup,
         "telegram": cmd_telegram,
         "gateway": cmd_gateway,
+        "dashboard": cmd_dashboard,
         "version": cmd_version,
     }
 
