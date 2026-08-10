@@ -5,8 +5,9 @@ set -euo pipefail
 #  Aishe CLI — One-Command Setup
 #  "Voice-first AI assistant for your terminal"
 #
-#  Installs everything: Python deps, Ollama, DeepAgent sidecar,
-#  configures services, and starts them on HTTP.
+#  Streamlined install: Python deps + DeepAgent sidecar + CLI.
+#  Ollama and voice (STT/TTS) are NOT installed here — install
+#  them separately beforehand (see README).
 #
 #  Supports: macOS, Linux, Windows (Git Bash / WSL)
 #
@@ -99,101 +100,22 @@ for dep in "${DEPS[@]}"; do
     fi
 done
 
-# Optional: webrtcvad for voice activity detection
-if "$PYTHON" -c "import webrtcvad" 2>/dev/null; then
-    pass "webrtcvad (VAD) already installed"
-else
-    info "webrtcvad (VAD) not found — optional, install with: pip install webrtcvad"
-fi
-
-# ── 3. Install Ollama ──────────────────────────────────────
-echo -e "\n  ${BOLD}3. Ollama${NC}"
-
-install_ollama() {
-    case "$OS_NAME" in
-        macOS)
-            if command -v brew &>/dev/null; then
-                info "Installing Ollama via Homebrew..."
-                brew install ollama 2>&1 | tail -1
-            else
-                info "Downloading Ollama for macOS..."
-                curl -fsSL https://ollama.com/install.sh | sh 2>&1 | tail -3
-            fi
-            ;;
-        Linux)
-            info "Installing Ollama via official script..."
-            curl -fsSL https://ollama.com/install.sh | sh 2>&1 | tail -3
-            ;;
-        Windows)
-            warn "Ollama on Windows: Download from https://ollama.com/download"
-            warn "  or: winget install Ollama.Ollama"
-            return 1
-            ;;
-    esac
-    return 0
-}
-
+# ── 3. Prereq check: Ollama (not installed here) ───────────
+echo -e "\n  ${BOLD}3. Prerequisites${NC}"
 if command -v ollama &>/dev/null; then
     pass "ollama found at $(command -v ollama)"
 else
-    if install_ollama; then
-        pass "Ollama installed"
-    else
-        warn "Ollama installation skipped. Install manually: https://ollama.com/download"
-    fi
+    warn "ollama not found — install it first: https://ollama.com/download"
+    warn "  then pull a model: ollama pull qwen2.5:3b"
 fi
-
-# ── 4. Start Ollama serve ──────────────────────────────────
-echo -e "\n  ${BOLD}4. Start Ollama${NC}"
-
-ollama_running() {
-    curl -s --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1
-}
-
-if ollama_running; then
-    pass "Ollama already running on http://localhost:11434"
+if curl -s --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1; then
+    pass "Ollama running on http://localhost:11434"
 else
-    info "Starting Ollama server..."
-    if command -v ollama &>/dev/null; then
-        # Start in background
-        nohup ollama serve > /tmp/ollama.log 2>&1 &
-        OLLAMA_PID=$!
-        # Wait for it to be ready
-        for i in $(seq 1 15); do
-            sleep 1
-            if ollama_running; then
-                pass "Ollama server started (PID: $OLLAMA_PID)"
-                break
-            fi
-        done
-        if ! ollama_running; then
-            warn "Ollama may not have started. Check: cat /tmp/ollama.log"
-        fi
-    else
-        warn "ollama command not found — skipping server start"
-    fi
+    warn "Ollama not running — start it: ollama serve"
 fi
 
-# ── 5. Pull default model ──────────────────────────────────
-echo -e "\n  ${BOLD}5. Pull Default Model${NC}"
-
-DEFAULT_MODEL="${AISHE_MODEL:-qwen2.5:3b}"
-
-if ollama_running; then
-    # Check if model already exists
-    if curl -s http://localhost:11434/api/tags | grep -q "$DEFAULT_MODEL"; then
-        pass "Model ${DEFAULT_MODEL} already pulled"
-    else
-        info "Pulling ${DEFAULT_MODEL} (this may take a while)..."
-        ollama pull "$DEFAULT_MODEL" 2>&1 | tail -1
-        pass "Pulled ${DEFAULT_MODEL}"
-    fi
-else
-    warn "Ollama not running — skipping model pull"
-fi
-
-# ── 6. Install DeepAgent sidecar ────────────────────────────
-echo -e "\n  ${BOLD}6. DeepAgent Sidecar${NC}"
+# ── 4. Install DeepAgent sidecar ────────────────────────────
+echo -e "\n  ${BOLD}4. DeepAgent Sidecar${NC}"
 
 DEEPAGENT_DIR="${HOME}/.local/share/aishe-cli/deepagent"
 DEEPAGENT_VENV="${DEEPAGENT_DIR}/.venv"
@@ -463,8 +385,8 @@ PYEOF
     pass "DeepAgent sidecar ready at ${DEEPAGENT_DIR}"
 fi
 
-# ── 7. Start DeepAgent sidecar ──────────────────────────────
-echo -e "\n  ${BOLD}7. Start DeepAgent${NC}"
+# ── 5. Start DeepAgent sidecar ──────────────────────────────
+echo -e "\n  ${BOLD}5. Start DeepAgent${NC}"
 
 deepagent_running() {
     curl -s --max-time 2 http://localhost:8765/health >/dev/null 2>&1
@@ -492,143 +414,8 @@ else
     fi
 fi
 
-# ── 8. Voice sidecars (STT + TTS) ─────────────────────────────
-# Opt-in: set AISHE_INSTALL_VOICE=1 to auto-install + start STT/TTS
-# Set AISHE_STT_DEVICE=cuda for GPU STT (needs libcublas; otherwise CPU)
-# Set AISHE_STT_MODEL=base|small|medium|large-v3 to choose model size
-
-echo -e "\n  ${BOLD}8. Voice Sidecars (STT + TTS)${NC}"
-
-SIDECAR_DIR="${HOME}/.local/share/aishe-cli/sidecars"
-SIDECAR_VENV="${SIDECAR_DIR}/.venv"
-SIDECAR_MODELS="${SIDECAR_DIR}/models"
-
-install_voice_sidecars() {
-    if [ ! -f "${SIDECAR_VENV}/bin/python" ]; then
-        info "Creating voice sidecar venv..."
-        mkdir -p "${SIDECAR_DIR}"
-        if command -v uv &>/dev/null; then
-            uv venv "${SIDECAR_VENV}" --python 3.11 2>&1 | tail -1
-        else
-            "$PYTHON" -m venv "${SIDECAR_VENV}" 2>&1 | tail -1
-        fi
-        info "Installing STT (faster-whisper) + TTS (kokoro-onnx)..."
-        if command -v uv &>/dev/null; then
-            uv pip install --python "${SIDECAR_VENV}/bin/python" \
-                faster-whisper "kokoro-onnx>=0.5.0" "fastapi>=0.110.0" \
-                "uvicorn[standard]" python-multipart soundfile 2>&1 | tail -2
-        else
-            "${SIDECAR_VENV}/bin/pip" install --quiet \
-                "faster-whisper>=1.0.0" "kokoro-onnx>=0.5.0" \
-                "fastapi>=0.110.0" "uvicorn[standard]" python-multipart soundfile 2>&1 | tail -2
-        fi
-    else
-        pass "Voice sidecar venv already exists at ${SIDECAR_VENV}"
-    fi
-
-    # Download Kokoro TTS model (~325 MB ONNX + 28 MB voices)
-    mkdir -p "${SIDECAR_MODELS}/kokoro"
-    if [ ! -f "${SIDECAR_MODELS}/kokoro/kokoro-v1.0.onnx" ] || \
-       [ ! -f "${SIDECAR_MODELS}/kokoro/voices-v1.0.bin" ]; then
-        info "Downloading Kokoro TTS model (~350 MB, one-time)..."
-        if command -v curl &>/dev/null; then
-            curl -fsSL -o "${SIDECAR_MODELS}/kokoro/kokoro-v1.0.onnx" \
-                "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx" \
-                && pass "Downloaded kokoro onnx" \
-                || warn "Failed to download kokoro onnx"
-            curl -fsSL -o "${SIDECAR_MODELS}/kokoro/voices-v1.0.bin" \
-                "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin" \
-                && pass "Downloaded kokoro voices" \
-                || warn "Failed to download kokoro voices"
-        else
-            warn "curl not found — please download Kokoro models manually to ${SIDECAR_MODELS}/kokoro/"
-        fi
-    else
-        pass "Kokoro TTS model already downloaded"
-    fi
-
-    pass "STT model (faster-whisper) will auto-download on first request"
-}
-
-stt_running() { curl -s --max-time 2 http://localhost:5093/healthz >/dev/null 2>&1; }
-tts_running() { curl -s --max-time 2 http://localhost:8766/health >/dev/null 2>&1; }
-
-if [ "${AISHE_INSTALL_VOICE:-0}" = "1" ]; then
-    install_voice_sidecars
-
-    # Start STT
-    if stt_running; then
-        pass "STT already running on http://localhost:5093"
-    else
-        info "Starting STT (faster-whisper) sidecar..."
-        export AISHE_STT_DEVICE="${AISHE_STT_DEVICE:-cpu}"
-        export AISHE_STT_MODEL="${AISHE_STT_MODEL:-small}"
-        nohup "${SIDECAR_VENV}/bin/python" "${SCRIPT_SRC}/sidecars/stt_server.py" > /tmp/aishe_stt.log 2>&1 &
-        for i in $(seq 1 60); do
-            sleep 1
-            if stt_running; then
-                pass "STT started on http://localhost:5093 (device=${AISHE_STT_DEVICE}, model=${AISHE_STT_MODEL})"
-                break
-            fi
-        done
-        stt_running || warn "STT may not have started. Check: cat /tmp/aishe_stt.log"
-    fi
-
-    # Start TTS
-    if tts_running; then
-        pass "TTS already running on http://localhost:8766"
-    else
-        info "Starting TTS (kokoro-onnx) sidecar..."
-        nohup "${SIDECAR_VENV}/bin/python" "${SCRIPT_SRC}/sidecars/tts_server.py" > /tmp/aishe_tts.log 2>&1 &
-        for i in $(seq 1 30); do
-            sleep 1
-            if tts_running; then
-                pass "TTS started on http://localhost:8766"
-                break
-            fi
-        done
-        tts_running || warn "TTS may not have started. Check: cat /tmp/aishe_tts.log"
-    fi
-else
-    info "Skipping voice sidecars (set AISHE_INSTALL_VOICE=1 to install STT+TTS)"
-    info "Voice services will be DOWN in aishe status until sidecars are running"
-fi
-
-# ── 9. Install ffmpeg ───────────────────────────────────────
-echo -e "\n  ${BOLD}9. ffmpeg (for mic recording)${NC}"
-
-if command -v ffmpeg &>/dev/null; then
-    pass "ffmpeg found at $(command -v ffmpeg)"
-else
-    case "$OS_NAME" in
-        macOS)
-            if command -v brew &>/dev/null; then
-                info "Installing ffmpeg via Homebrew..."
-                brew install ffmpeg 2>&1 | tail -1 && pass "ffmpeg installed" || warn "ffmpeg install failed"
-            else
-                warn "Install ffmpeg: brew install ffmpeg"
-            fi
-            ;;
-        Linux)
-            if command -v apt-get &>/dev/null; then
-                info "Installing ffmpeg via apt..."
-                sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg 2>&1 | tail -1 && pass "ffmpeg installed" || warn "ffmpeg install failed"
-            elif command -v pacman &>/dev/null; then
-                info "Installing ffmpeg via pacman..."
-                sudo pacman -S --noconfirm ffmpeg 2>&1 | tail -1 && pass "ffmpeg installed" || warn "ffmpeg install failed"
-            else
-                warn "Install ffmpeg: sudo apt-get install ffmpeg"
-            fi
-            ;;
-        Windows)
-            warn "ffmpeg not found. Download: https://ffmpeg.org/download.html"
-            warn "  or: winget install ffmpeg"
-            ;;
-    esac
-fi
-
-# ── 10. Symlink to PATH ────────────────────────────────────
-echo -e "\n  ${BOLD}10. Install aishe Command${NC}"
+# ── 6. Symlink to PATH ────────────────────────────────────
+echo -e "\n  ${BOLD}6. Install aishe Command${NC}"
 
 case "$OS_NAME" in
     Windows)
@@ -661,8 +448,8 @@ case "$OS_NAME" in
         ;;
 esac
 
-# ── 11. Config directory ───────────────────────────────────
-echo -e "\n  ${BOLD}11. Configuration${NC}"
+# ── 7. Config directory ───────────────────────────────────
+echo -e "\n  ${BOLD}7. Configuration${NC}"
 
 CONFIG_DIR="${HOME}/.config/aishe"
 DEFAULT_DATA_DIR="${HOME}/aishe"
@@ -694,8 +481,8 @@ else
     pass "Config already exists at ${CONFIG_DIR}/config.yaml"
 fi
 
-# ── 12. Data directories ───────────────────────────────────
-echo -e "\n  ${BOLD}12. Data Directories${NC}"
+# ── 8. Data directories ───────────────────────────────────
+echo -e "\n  ${BOLD}8. Data Directories${NC}"
 mkdir -p "${DEFAULT_DATA_DIR}/memory" "${DEFAULT_DATA_DIR}/threads"
 pass "Created data directories at ${DEFAULT_DATA_DIR}"
 
@@ -706,10 +493,7 @@ echo -e "  ${BOLD}│${NC}        ${GREEN}✨ Setup Complete! ✨${NC}         $
 echo -e "  ${BOLD}╰──────────────────────────────────────╯${NC}"
 echo ""
 echo -e "  ${CYAN}Services running:${NC}"
-if ollama_running; then echo -e "     ${GREEN}●${NC} Ollama      ${DIM}http://localhost:11434${NC}"; fi
 if deepagent_running; then echo -e "     ${GREEN}●${NC} DeepAgent   ${DIM}http://localhost:8765${NC}"; fi
-if stt_running 2>/dev/null; then echo -e "     ${GREEN}●${NC} STT (Whisper) ${DIM}http://localhost:5093${NC}"; fi
-if tts_running 2>/dev/null; then echo -e "     ${GREEN}●${NC} TTS (Kokoro)  ${DIM}http://localhost:8766${NC}"; fi
 echo ""
 echo -e "  ${CYAN}Next steps:${NC}"
 echo -e "  1. Run: ${CYAN}aishe status${NC}"
@@ -717,10 +501,7 @@ echo ""
 echo -e "  2. Start chatting: ${CYAN}aishe${NC}"
 echo -e "     Or go live:      ${CYAN}aishe live${NC}"
 echo ""
-if [ "${AISHE_INSTALL_VOICE:-0}" != "1" ]; then
-echo -e "  ${CYAN}Enable voice (STT+TTS) anytime:${NC}"
-echo -e "     ${CYAN}AISHE_INSTALL_VOICE=1 bash ${SCRIPT_SRC}/setup.sh${NC}"
-echo -e "  ${DIM}This downloads Kokoro TTS (~350 MB) + faster-whisper STT.${NC}"
-echo -e "  ${DIM}After that: aishe live works with full voice.${NC}"
+echo -e "  ${DIM}Note: Ollama + voice (STT/TTS) are installed separately.${NC}"
+echo -e "  ${DIM}Ensure Ollama is running (ollama serve) with a model pulled.${NC}"
+echo -e "  ${DIM}For voice, install STT/TTS sidecars per the README.${NC}"
 echo ""
-fi
