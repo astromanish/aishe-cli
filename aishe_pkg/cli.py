@@ -706,14 +706,60 @@ def _telegram_stop() -> None:
 
 
 def cmd_gateway(args: Any) -> None:
-    """Gateway control — start/restart/stop/status for the Telegram bridge."""
+    """Gateway control — start/restart/stop/status for the Telegram bridge.
+
+    Bare `aishe gateway` (no action) tails the bridge log live.
+    """
     action = getattr(args, "gw_action", None)
     if action in ("start", "restart"):
         cmd_telegram(type("A", (), {"tg_action": action})())
     elif action == "stop":
         cmd_telegram(type("A", (), {"tg_action": "stop"})())
-    else:  # status
+    elif action == "status":
         cmd_telegram(type("A", (), {"tg_action": "status"})())
+    else:  # bare `aishe gateway` → live log view
+        cmd_gateway_logs(args)
+
+
+def cmd_gateway_logs(args: Any) -> None:
+    """Live-tail the Telegram bridge log file."""
+    import time as _t
+
+    log_file = get("telegram.log_file", "~/aishe/telegram.log")
+    log_file = os.path.expanduser(log_file)
+
+    if not os.path.exists(log_file):
+        print(red(f"Log file not found: {log_file}"))
+        print(dim("Start the bridge first: aishe gateway start"))
+        sys.exit(1)
+
+    print(bold("📡 Aishe Gateway — live bridge log"))
+    print(dim(f"Tailing: {log_file}"))
+    print(dim("Ctrl+C to stop."))
+    print(dim("─" * 50))
+
+    # Print the last N lines first, then follow new ones.
+    try:
+        with open(log_file) as f:
+            lines = f.readlines()
+        for line in lines[-20:]:
+            print(line.rstrip())
+    except Exception as e:
+        print(red(f"Could not read log: {e}"))
+        sys.exit(1)
+
+    # Follow the file for new lines.
+    try:
+        with open(log_file) as f:
+            f.seek(0, 2)  # end of file
+            while True:
+                line = f.readline()
+                if line:
+                    print(line.rstrip(), flush=True)
+                else:
+                    _t.sleep(0.5)
+    except KeyboardInterrupt:
+        print(f"\n{dim('Log view stopped.')}")
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────
