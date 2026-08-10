@@ -59,6 +59,9 @@ API = "https://api.telegram.org/bot{token}/{method}"
 
 
 def tg(token: str, method: str, **params):
+    # Drop None values so we never send e.g. parse_mode: null — Telegram
+    # rejects an explicit null parse_mode with "unsupported parse_mode".
+    params = {k: v for k, v in params.items() if v is not None}
     r = requests.post(API.format(token=token, method=method), json=params, timeout=30)
     r.raise_for_status()
     return r.json()
@@ -72,6 +75,15 @@ def _send(token: str, chat_id, text: str, parse: str | None = None) -> int | Non
     except Exception as e:
         body = getattr(e, "response", None)
         detail = getattr(body, "text", "") if body is not None else ""
+        # If HTML/Markdown parse failed, fall back to plain text so the answer
+        # always lands (stray * _ ` in model output break parse_mode).
+        if parse and "parse" in detail.lower():
+            try:
+                res = tg(token, "sendMessage", chat_id=chat_id, text=text,
+                         disable_web_page_preview=True)
+                return res.get("result", {}).get("message_id")
+            except Exception as e2:
+                print(f"[aishe-tg] send failed (plain fallback): {e2}", flush=True)
         print(f"[aishe-tg] send failed: {e} :: {detail}", flush=True)
         return None
 
@@ -86,6 +98,14 @@ def _edit(token: str, chat_id, message_id, text: str, parse: str | None = None) 
         if "not modified" not in str(e):
             body = getattr(e, "response", None)
             detail = getattr(body, "text", "") if body is not None else ""
+            # Parse-mode failure → edit again as plain text so it always lands.
+            if parse and "parse" in detail.lower():
+                try:
+                    tg(token, "editMessageText", chat_id=chat_id, message_id=message_id,
+                       text=text, disable_web_page_preview=True)
+                    return
+                except Exception:
+                    pass
             print(f"[aishe-tg] edit failed: {e} :: {detail}", flush=True)
 
 
@@ -201,42 +221,62 @@ def _stream_answer(token: str, chat_id, message: str, deepagent_url: str, tid: s
         _log(log_file, f"[done] tools={tool_count} answer_len={len(done)}")
         print(f"[aishe-tg] ← {len(done)} chars, {tool_count} tool calls → {chat_id}", flush=True)
 
-        # Edit the status message into the rich answer (chunked for Telegram's 4096 limit).
-        _deliver_rich(token, chat_id, status_id, rich)
+        # Deliver the answer as a FRESH message via _send (has plain-text fallback),
+        # and clean up the "⏳ Working…" bubble. Never rely on edit for delivery.
+        _deliver_rich(token, chat_id, status_id, rich, log_file)
 
     except Exception as e:
         _edit(token, chat_id, status_id, html.escape(answer_buf[-4000:] or f"(stream error: {e})"))
         print(f"[aishe-tg] stream error: {e}", flush=True)
 
 
-def _deliver_rich(token: str, chat_id, status_id: int, rich_html: str) -> None:
-    """Send rich HTML in ≤4096-char chunks; first chunk edits the status msg."""
+def _deliver_rich(token: str, chat_id, status_id, rich_html: str, log_file=None) -> None:
+    """Send the final answer as fresh message(s) via _send (plain-text fallback
+    built in), then delete the status bubble. Chunks on paragraph boundaries so
+    HTML tags never split. Logs explicit success/failure per send."""
     MAX = 4000
-    if len(rich_html) <= MAX:
-        _edit(token, chat_id, status_id, rich_html, parse="HTML")
-        return
-    # chunk on paragraph boundaries so HTML tags never split
     chunks: list[str] = []
-    current = ""
-    for para in re.split(r"(\n{2,})", rich_html):
-        if len(current) + len(para) > MAX and current:
+    if len(rich_html) <= MAX:
+        chunks = [rich_html]
+    else:
+        current = ""
+        for para in re.split(r"(\n{2,})", rich_html):
+            if len(current) + len(para) > MAX and current:
+                chunks.append(current)
+                current = para
+            else:
+                current += para
+        if current:
             chunks.append(current)
-            current = para
-        else:
-            current += para
-    if current:
-        chunks.append(current)
-    # safety: split any overlong chunk mid-text
-    final_chunks: list[str] = []
-    for c in chunks:
-        while len(c) > MAX:
-            final_chunks.append(c[:MAX])
-            c = c[MAX:]
-        if c:
-            final_chunks.append(c)
-    _edit(token, chat_id, status_id, final_chunks[0], parse="HTML")
-    for c in final_chunks[1:]:
-        _send(token, chat_id, c, parse="HTML")
+        # safety: split any overlong chunk mid-text
+        final_chunks: list[str] = []
+        for c in chunks:
+            while len(c) > MAX:
+                final_chunks.append(c[:MAX])
+                c = c[MAX:]
+            if c:
+                final_chunks.append(c)
+        chunks = final_chunks
+
+    landed = False
+    for i, c in enumerate(chunks):
+        mid = _send(token, chat_id, c, parse="HTML")
+        if mid is None:
+            # HTML failed; _send already tried plain text. Try plain once more explicitly.
+            mid = _send(token, chat_id, c)
+        landed = landed or mid is not None
+        _log(log_file, f"[deliver] chunk {i+1}/{len(chunks)} mid={mid}")
+        print(f"[aishe-tg] delivered chunk {i+1}/{len(chunks)} -> mid={mid}", flush=True)
+
+    if not landed:
+        print(f"[aishe-tg] ⚠️ final answer did NOT land for {chat_id}", flush=True)
+
+    # clean up the status bubble
+    if status_id is not None:
+        try:
+            tg(token, "deleteMessage", chat_id=chat_id, message_id=status_id)
+        except Exception as e:
+            print(f"[aishe-tg] status cleanup: {e}", flush=True)
 
 
 # ─── Main loop ─────────────────────────────────────────────────────────────
