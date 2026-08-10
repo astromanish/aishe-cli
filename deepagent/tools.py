@@ -44,30 +44,60 @@ def word_stats(text: str) -> str:
 
 MEMORY_FILE = Path.home() / ".local" / "share" / "aishe" / "memory" / "facts.jsonl"
 
+# ─── Semantic memory (mem0 + Qdrant) ───────────────────────────────────────
+# Richer than JSONL: auto-extraction, dedup, hybrid BM25 + semantic search.
+# Falls back to the legacy JSONL store if mem0/Qdrant are unavailable.
+
+def _mem0_add(fact: str) -> str:
+    """Add a fact to semantic memory. Returns a confirmation string."""
+    try:
+        from mem0_memory import add as _add
+        _add(fact)
+        return f"Saved: {fact}"
+    except Exception as exc:
+        # Fallback to legacy JSONL
+        import uuid
+        MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        entry = {"id": f"mem_{uuid.uuid4().hex}", "fact": fact, "timestamp": datetime.now().isoformat()}
+        with open(MEMORY_FILE, "a") as f: f.write(json.dumps(entry) + "\n")
+        return f"Saved (legacy): {fact}"
+
+
+def _mem0_search(query: str) -> str:
+    """Search semantic memory. Returns formatted results."""
+    try:
+        from mem0_memory import search as _search
+        results = _search(query, limit=10)
+        if results:
+            lines = [f"• {r['fact']} (saved {r.get('timestamp', '?')[:10]})" for r in results]
+            return "Relevant memories:\n" + "\n".join(lines)
+        return "No matching memories found."
+    except Exception:
+        # Fallback to legacy JSONL substring search
+        if not MEMORY_FILE.exists(): return "No memories stored yet."
+        query_words = [w for w in query.lower().split() if len(w) > 2]
+        results = []
+        for line in MEMORY_FILE.read_text().splitlines():
+            if not line.strip(): continue
+            try: entry = json.loads(line)
+            except: continue
+            fact_lower = entry.get("fact", "").lower()
+            if any(word in fact_lower for word in query_words):
+                results.append(f"• {entry['fact']} (saved {entry.get('timestamp', '?')[:10]})")
+        if results: return "Relevant memories:\n" + "\n".join(results[:10])
+        return "No matching memories found."
+
+
 @tool
 def memory_search(query: str) -> str:
     """Search the user's personal memory store for facts about them. Use this when the user asks about themselves."""
-    if not MEMORY_FILE.exists(): return "No memories stored yet."
-    query_words = [w for w in query.lower().split() if len(w) > 2]
-    results = []
-    for line in MEMORY_FILE.read_text().splitlines():
-        if not line.strip(): continue
-        try: entry = json.loads(line)
-        except: continue
-        fact_lower = entry.get("fact", "").lower()
-        if any(word in fact_lower for word in query_words):
-            results.append(f"• {entry['fact']} (saved {entry.get('timestamp', '?')[:10]})")
-    if results: return "Relevant memories:\n" + "\n".join(results[:10])
-    return "No matching memories found."
+    return _mem0_search(query)
+
 
 @tool
 def memory_add(fact: str) -> str:
     """Save a new fact about the user to their personal memory store."""
-    import uuid
-    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"id": f"mem_{uuid.uuid4().hex}", "fact": fact, "timestamp": datetime.now().isoformat()}
-    with open(MEMORY_FILE, "a") as f: f.write(json.dumps(entry) + "\n")
-    return f"Saved: {fact}"
+    return _mem0_add(fact)
 
 
 # ─── Web search ─────────────────────────────────────────────────────────────

@@ -464,7 +464,7 @@ def cmd_setup(args: Any) -> None:
     from .util import check as util_check
 
     ollama_url = cfg_get("services.ollama", "http://localhost:11434")
-    current = cfg_get("model", "qwen2.5:3b")
+    current = cfg_get("model", "deepseek-v4-flash:cloud")
 
     header("Aishe Setup", "Choose your Ollama model")
 
@@ -491,7 +491,7 @@ def cmd_setup(args: Any) -> None:
     # 2. Choose a model
     section("Choose Model")
     if models:
-        print("  Pick a number or type a model name (e.g. llama3.2, qwen2.5:7b):")
+        print("  Pick a number or type a model name (e.g. deepseek-v4-flash:cloud, llama3.2):")
         for i, m in enumerate(models, 1):
             print(f"    [{i}] {m}")
         try:

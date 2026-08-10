@@ -35,7 +35,7 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 # ─── Defaults ───────────────────────────────────────────────
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "model": "qwen2.5:3b",
+    "model": "deepseek-v4-flash:cloud",
     "services": {
         "deepagent": "http://localhost:8765",
         "ollama": "http://localhost:11434",

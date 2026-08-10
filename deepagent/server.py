@@ -28,7 +28,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
 
 @app.get("/")
 def root():
-    return {"service": "aishe-deepagent", "model": os.environ.get("AISHE_MODEL", "qwen2.5:3b"), "endpoints": ["/health", "/tools", "/invoke", "/stream"]}
+    return {"service": "aishe-deepagent", "model": os.environ.get("AISHE_MODEL", "deepseek-v4-flash:cloud"), "endpoints": ["/health", "/tools", "/invoke", "/stream"]}
 
 @app.get("/health")
 def health():

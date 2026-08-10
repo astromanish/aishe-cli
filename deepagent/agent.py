@@ -7,7 +7,7 @@ from deepagents.backends.filesystem import FilesystemBackend
 from langchain_openai import ChatOpenAI
 from tools import calculator, get_current_time, word_stats, memory_search, memory_add, web_search, web_extract, run_command
 
-MODEL_NAME = os.environ.get("AISHE_MODEL", "qwen2.5:3b")
+MODEL_NAME = os.environ.get("AISHE_MODEL", "deepseek-v4-flash:cloud")
 BASE_URL = os.environ.get("AISHE_OLLAMA_URL", "http://localhost:11434/v1")
 API_KEY = os.environ.get("AISHE_API_KEY", "ollama")
 

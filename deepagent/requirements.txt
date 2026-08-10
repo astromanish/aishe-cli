@@ -5,3 +5,6 @@ langchain-ollama>=1.0.0
 langchain-openai>=0.1.0
 deepagents>=0.6.0
 pydantic>=2.0
+mem0ai>=0.1.0
+qdrant-client>=1.9.0
+fastembed>=0.3.0

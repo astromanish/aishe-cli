@@ -106,7 +106,7 @@ if command -v ollama &>/dev/null; then
     pass "ollama found at $(command -v ollama)"
 else
     warn "ollama not found — install it first: https://ollama.com/download"
-    warn "  then pull a model: ollama pull qwen2.5:3b"
+    warn "  then pull a model: ollama pull deepseek-v4-flash:cloud"
 fi
 if curl -s --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1; then
     pass "Ollama running on http://localhost:11434"
@@ -135,7 +135,274 @@ langchain-ollama>=1.0.0
 langchain-openai>=0.1.0
 deepagents>=0.6.0
 pydantic>=2.0
+mem0ai>=0.1.0
+qdrant-client>=1.9.0
+fastembed>=0.3.0
 EOF
+
+    cat > "${DEEPAGENT_DIR}/mem0_memory.py" << 'PYEOF'
+"""Semantic memory for Aishe — mem0 over Qdrant with local Ollama embeddings.
+
+Provides richer memory than plain JSONL: automatic fact extraction, deduplication,
+and hybrid BM25 + semantic (vector) search.
+
+Stack:
+  - Vector store: Qdrant local at http://localhost:6333
+  - Embeddings:  local Ollama qwen3-embedding:0.6b (1024-dim)
+  - LLM (extraction): deepseek-v4-flash:cloud via Ollama OpenAI-compatible endpoint
+
+Falls back to the legacy JSONL store if mem0 / Qdrant are unavailable, so the
+CLI keeps working even without the vector backend.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# ─── Config ────────────────────────────────────────────────────────────────
+
+DATA_DIR = Path(os.environ.get("AISHE_DATA_DIR", str(Path.home() / "aishe")))
+MEMORY_DIR = DATA_DIR / "memory"
+LEGACY_FILE = MEMORY_DIR / "facts.jsonl"
+
+QDRANT_URL = os.environ.get("AISHE_QDRANT_URL", "http://localhost:6333")
+COLLECTION = os.environ.get("AISHE_MEMORY_COLLECTION", "aishe_memories")
+EMBED_MODEL = os.environ.get("AISHE_EMBED_MODEL", "qwen3-embedding:0.6b")
+EMBED_DIMS = int(os.environ.get("AISHE_EMBED_DIMS", "1024"))
+LLM_MODEL = os.environ.get("AISHE_MODEL", "deepseek-v4-flash:cloud")
+OLLAMA_URL = os.environ.get("AISHE_OLLAMA_URL", "http://localhost:11434")
+# Normalize: strip a trailing /v1 so the base works whether the env var has it or not.
+OLLAMA_BASE = OLLAMA_URL.rstrip("/")
+if OLLAMA_BASE.endswith("/v1"):
+    OLLAMA_BASE = OLLAMA_BASE[:-3]
+LLM_API_KEY = os.environ.get("AISHE_API_KEY", "ollama")
+
+os.environ.setdefault("MEM0_TELEMETRY", "false")
+
+_mem0 = None
+_mem0_error: Optional[str] = None
+
+
+def _build_mem0():
+    """Lazily build the mem0 client. Returns None (with _mem0_error set) on failure."""
+    global _mem0, _mem0_error
+    if _mem0 is not None or _mem0_error is not None:
+        return _mem0
+
+    try:
+        from mem0 import Memory
+    except ImportError:
+        _mem0_error = "mem0 not installed (pip install mem0ai)"
+        return None
+
+    config = {
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "url": QDRANT_URL,
+                "collection_name": COLLECTION,
+                "embedding_model_dims": EMBED_DIMS,
+            },
+        },
+        "llm": {
+            "provider": "openai",
+            "config": {
+                "model": LLM_MODEL,
+                "temperature": 0.1,
+                "max_tokens": 1024,
+                "api_key": LLM_API_KEY,
+                "openai_base_url": f"{OLLAMA_BASE}/v1",
+            },
+        },
+        "embedder": {
+            "provider": "ollama",
+            "config": {
+                "model": EMBED_MODEL,
+                "embedding_dims": EMBED_DIMS,
+                "ollama_base_url": OLLAMA_BASE,
+            },
+        },
+    }
+
+    try:
+        _mem0 = Memory.from_config(config)
+    except Exception as exc:  # noqa: BLE001
+        _mem0_error = f"mem0 init failed: {exc}"
+        return None
+    return _mem0
+
+
+def _qdrant_up() -> bool:
+    """Check whether Qdrant is reachable."""
+    try:
+        import requests
+        return requests.get(f"{QDRANT_URL}/collections", timeout=2).status_code == 200
+    except Exception:
+        return False
+
+
+def _now() -> str:
+    return datetime.now().isoformat()
+
+
+# ─── Public API ────────────────────────────────────────────────────────────
+
+def add(fact: str) -> str:
+    """Add a fact to semantic memory. Returns the entry ID."""
+    m = _build_mem0()
+    if m is not None and _qdrant_up():
+        try:
+            m.add(fact, user_id="aishe")
+            return f"mem_{uuid.uuid4().hex}"
+        except Exception as exc:  # noqa: BLE001
+            _mem0_error = f"mem0 add failed: {exc}"
+            # fall through to legacy
+
+    # Legacy JSONL fallback
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    entry = {"id": f"mem_{uuid.uuid4().hex}", "fact": fact, "timestamp": _now()}
+    with open(LEGACY_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return entry["id"]
+
+
+def search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Semantic search over memories. Returns list of {id, fact, timestamp}."""
+    m = _build_mem0()
+    if m is not None and _qdrant_up():
+        try:
+            results = m.search(query, user_id="aishe", limit=limit)
+            out: List[Dict[str, Any]] = []
+            for r in results:
+                mem = r.get("memory", "")
+                meta = r.get("metadata", {}) or {}
+                out.append({
+                    "id": meta.get("id", f"mem_{uuid.uuid4().hex}"),
+                    "fact": mem,
+                    "timestamp": meta.get("created_at", ""),
+                    "score": r.get("score"),
+                })
+            return out
+        except Exception as exc:  # noqa: BLE001
+            _mem0_error = f"mem0 search failed: {exc}"
+            # fall through to legacy
+
+    # Legacy JSONL fallback (substring)
+    if not LEGACY_FILE.exists():
+        return []
+    ql = query.lower()
+    results: List[Dict[str, Any]] = []
+    for line in LEGACY_FILE.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ql in entry.get("fact", "").lower():
+            results.append(entry)
+    return results[:limit]
+
+
+def list_all() -> List[Dict[str, Any]]:
+    """List all memories (legacy JSONL only — mem0 has no simple list-all)."""
+    if not LEGACY_FILE.exists():
+        return []
+    entries: List[Dict[str, Any]] = []
+    for line in LEGACY_FILE.read_text().splitlines():
+        if line.strip():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def clear() -> int:
+    """Delete all memories. Returns count of deleted entries."""
+    if not LEGACY_FILE.exists():
+        return 0
+    count = sum(1 for l in LEGACY_FILE.read_text().splitlines() if l.strip())
+    LEGACY_FILE.unlink()
+    return count
+
+
+def count() -> int:
+    """Count memory entries (legacy JSONL)."""
+    if not LEGACY_FILE.exists():
+        return 0
+    return sum(1 for l in LEGACY_FILE.read_text().splitlines() if l.strip())
+
+
+def status() -> str:
+    """Human-readable backend status."""
+    m = _build_mem0()
+    if m is not None and _qdrant_up():
+        return f"mem0 + Qdrant ({COLLECTION}) — embeddings {EMBED_MODEL}"
+    if _mem0_error:
+        return f"legacy JSONL (mem0 unavailable: {_mem0_error})"
+    return "legacy JSONL (Qdrant not running)"
+
+
+# ─── CLI handlers ───────────────────────────────────────────────────────────
+
+def cmd_memory(args: Any) -> None:
+    from .util import bold, cyan, dim, green, red
+
+    action = args.action
+
+    if action == "add":
+        fact = " ".join(args.value) if isinstance(args.value, list) else args.value
+        if not fact:
+            fact = sys.stdin.read().strip()
+        if not fact:
+            print(red("No fact provided"))
+            sys.exit(1)
+        mid = add(fact)
+        print(f"{green('Added')} {mid}: {fact}")
+        return
+
+    if action == "search":
+        query = " ".join(args.value) if isinstance(args.value, list) else args.value
+        if not query:
+            print(red("No query provided"))
+            sys.exit(1)
+        results = search(query)
+        if results:
+            print(bold(f"Found {len(results)} match(es):"))
+            for r in results:
+                print(f"  {cyan(r['id'])}  {r['fact']}")
+                print(f"  {dim(r.get('timestamp', ''))}")
+        else:
+            print(dim("No matches found."))
+        return
+
+    if action == "list":
+        entries = list_all()
+        if not entries:
+            print(dim("No memories stored."))
+            return
+        print(bold(f"Memories ({len(entries)})"))
+        print("─" * 60)
+        for e in entries:
+            print(f"  {cyan(e['id'])}  {e['fact']}")
+            print(f"  {dim(e['timestamp'])}")
+        return
+
+    if action == "clear":
+        count = clear()
+        print(f"{red('Cleared')} {count} memories")
+        return
+
+    if action == "status":
+        print(status())
+        return
+PYEOF
 
     cat > "${DEEPAGENT_DIR}/tools.py" << 'PYEOF'
 """Custom tools for the Aishe DeepAgent."""
@@ -184,30 +451,60 @@ def word_stats(text: str) -> str:
 
 MEMORY_FILE = Path.home() / ".local" / "share" / "aishe" / "memory" / "facts.jsonl"
 
+# ─── Semantic memory (mem0 + Qdrant) ───────────────────────────────────────
+# Richer than JSONL: auto-extraction, dedup, hybrid BM25 + semantic search.
+# Falls back to the legacy JSONL store if mem0/Qdrant are unavailable.
+
+def _mem0_add(fact: str) -> str:
+    """Add a fact to semantic memory. Returns a confirmation string."""
+    try:
+        from mem0_memory import add as _add
+        _add(fact)
+        return f"Saved: {fact}"
+    except Exception as exc:
+        # Fallback to legacy JSONL
+        import uuid
+        MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        entry = {"id": f"mem_{uuid.uuid4().hex}", "fact": fact, "timestamp": datetime.now().isoformat()}
+        with open(MEMORY_FILE, "a") as f: f.write(json.dumps(entry) + "\n")
+        return f"Saved (legacy): {fact}"
+
+
+def _mem0_search(query: str) -> str:
+    """Search semantic memory. Returns formatted results."""
+    try:
+        from mem0_memory import search as _search
+        results = _search(query, limit=10)
+        if results:
+            lines = [f"• {r['fact']} (saved {r.get('timestamp', '?')[:10]})" for r in results]
+            return "Relevant memories:\n" + "\n".join(lines)
+        return "No matching memories found."
+    except Exception:
+        # Fallback to legacy JSONL substring search
+        if not MEMORY_FILE.exists(): return "No memories stored yet."
+        query_words = [w for w in query.lower().split() if len(w) > 2]
+        results = []
+        for line in MEMORY_FILE.read_text().splitlines():
+            if not line.strip(): continue
+            try: entry = json.loads(line)
+            except: continue
+            fact_lower = entry.get("fact", "").lower()
+            if any(word in fact_lower for word in query_words):
+                results.append(f"• {entry['fact']} (saved {entry.get('timestamp', '?')[:10]})")
+        if results: return "Relevant memories:\n" + "\n".join(results[:10])
+        return "No matching memories found."
+
+
 @tool
 def memory_search(query: str) -> str:
     """Search the user's personal memory store for facts about them. Use this when the user asks about themselves."""
-    if not MEMORY_FILE.exists(): return "No memories stored yet."
-    query_words = [w for w in query.lower().split() if len(w) > 2]
-    results = []
-    for line in MEMORY_FILE.read_text().splitlines():
-        if not line.strip(): continue
-        try: entry = json.loads(line)
-        except: continue
-        fact_lower = entry.get("fact", "").lower()
-        if any(word in fact_lower for word in query_words):
-            results.append(f"• {entry['fact']} (saved {entry.get('timestamp', '?')[:10]})")
-    if results: return "Relevant memories:\n" + "\n".join(results[:10])
-    return "No matching memories found."
+    return _mem0_search(query)
+
 
 @tool
 def memory_add(fact: str) -> str:
     """Save a new fact about the user to their personal memory store."""
-    import uuid
-    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"id": f"mem_{uuid.uuid4().hex}", "fact": fact, "timestamp": datetime.now().isoformat()}
-    with open(MEMORY_FILE, "a") as f: f.write(json.dumps(entry) + "\n")
-    return f"Saved: {fact}"
+    return _mem0_add(fact)
 PYEOF
 
     cat > "${DEEPAGENT_DIR}/agent.py" << 'PYEOF'
@@ -220,7 +517,7 @@ from deepagents.backends.filesystem import FilesystemBackend
 from langchain_openai import ChatOpenAI
 from tools import calculator, get_current_time, word_stats, memory_search, memory_add
 
-MODEL_NAME = os.environ.get("AISHE_MODEL", "qwen2.5:3b")
+MODEL_NAME = os.environ.get("AISHE_MODEL", "deepseek-v4-flash:cloud")
 BASE_URL = os.environ.get("AISHE_OLLAMA_URL", "http://localhost:11434/v1")
 API_KEY = os.environ.get("AISHE_API_KEY", "ollama")
 
@@ -309,7 +606,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
 
 @app.get("/")
 def root():
-    return {"service": "aishe-deepagent", "model": os.environ.get("AISHE_MODEL", "qwen2.5:3b"), "endpoints": ["/health", "/tools", "/invoke", "/stream"]}
+    return {"service": "aishe-deepagent", "model": os.environ.get("AISHE_MODEL", "deepseek-v4-flash:cloud"), "endpoints": ["/health", "/tools", "/invoke", "/stream"]}
 
 @app.get("/health")
 def health():
@@ -414,8 +711,43 @@ else
     fi
 fi
 
-# ── 6. Symlink to PATH ────────────────────────────────────
-echo -e "\n  ${BOLD}6. Install aishe Command${NC}"
+# ── 6. Qdrant (semantic memory backend) ─────────────────────
+echo -e "\n  ${BOLD}6. Qdrant (Memory)${NC}"
+
+QDRANT_BIN="${HOME}/.local/bin/qdrant"
+QDRANT_DATA="${HOME}/.local/share/aishe-cli/qdrant"
+
+qdrant_running() {
+    curl -s --max-time 2 http://localhost:6333/collections >/dev/null 2>&1
+}
+
+if qdrant_running; then
+    pass "Qdrant already running on http://localhost:6333"
+else
+    if [ -f "$QDRANT_BIN" ]; then
+        info "Starting Qdrant (data: ${QDRANT_DATA})..."
+        mkdir -p "$QDRANT_DATA"
+        # Qdrant stores data in its working directory — cd into the data dir
+        (cd "$QDRANT_DATA" && nohup "$QDRANT_BIN" > /tmp/qdrant.log 2>&1 &)
+        for i in $(seq 1 20); do
+            sleep 1
+            if qdrant_running; then
+                pass "Qdrant started on http://localhost:6333"
+                break
+            fi
+        done
+        if ! qdrant_running; then
+            warn "Qdrant may not have started. Check: cat /tmp/qdrant.log"
+        fi
+    else
+        warn "Qdrant binary not found at ${QDRANT_BIN}"
+        warn "  Install it: https://qdrant.tech/documentation/guides/installation/"
+        warn "  Semantic memory will fall back to legacy JSONL until Qdrant runs."
+    fi
+fi
+
+# ── 7. Symlink to PATH ────────────────────────────────────
+echo -e "\n  ${BOLD}7. Install aishe Command${NC}"
 
 case "$OS_NAME" in
     Windows)
@@ -449,7 +781,7 @@ case "$OS_NAME" in
 esac
 
 # ── 7. Config directory ───────────────────────────────────
-echo -e "\n  ${BOLD}7. Configuration${NC}"
+echo -e "\n  ${BOLD}8. Configuration${NC}"
 
 CONFIG_DIR="${HOME}/.config/aishe"
 DEFAULT_DATA_DIR="${HOME}/aishe"
@@ -482,7 +814,7 @@ else
 fi
 
 # ── 8. Data directories ───────────────────────────────────
-echo -e "\n  ${BOLD}8. Data Directories${NC}"
+echo -e "\n  ${BOLD}9. Data Directories${NC}"
 mkdir -p "${DEFAULT_DATA_DIR}/memory" "${DEFAULT_DATA_DIR}/threads"
 pass "Created data directories at ${DEFAULT_DATA_DIR}"
 
@@ -494,6 +826,7 @@ echo -e "  ${BOLD}╰───────────────────�
 echo ""
 echo -e "  ${CYAN}Services running:${NC}"
 if deepagent_running; then echo -e "     ${GREEN}●${NC} DeepAgent   ${DIM}http://localhost:8765${NC}"; fi
+if qdrant_running; then echo -e "     ${GREEN}●${NC} Qdrant      ${DIM}http://localhost:6333${NC}"; fi
 echo ""
 echo -e "  ${CYAN}Next steps:${NC}"
 echo -e "  1. Run: ${CYAN}aishe status${NC}"
@@ -504,4 +837,5 @@ echo ""
 echo -e "  ${DIM}Note: Ollama + voice (STT/TTS) are installed separately.${NC}"
 echo -e "  ${DIM}Ensure Ollama is running (ollama serve) with a model pulled.${NC}"
 echo -e "  ${DIM}For voice, install STT/TTS sidecars per the README.${NC}"
+echo -e "  ${DIM}Memory uses mem0 + Qdrant (semantic). Falls back to JSONL if Qdrant is down.${NC}"
 echo ""
