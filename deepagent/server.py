@@ -7,6 +7,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from agent import agent, extract_final_answer
+from mem0_memory import (
+    add as mem_add,
+    search as mem_search,
+    update as mem_update,
+    delete as mem_delete,
+    list_all as mem_list,
+    status as mem_status,
+)
 
 HOST = os.environ.get("AISHE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AISHE_PORT", "8765"))
@@ -65,31 +73,85 @@ def stream(req: StreamRequest):
         raise HTTPException(status_code=400, detail="message must not be empty")
     def _gen():
         last_answer = ""
-        for event in agent.stream({"messages": [{"role": "user", "content": req.message}]}, config=_config(req.thread_id), stream_mode="messages"):
-            runnable, raw = event
-            chunk = runnable
-            if hasattr(chunk, "tool_calls") and chunk.tool_calls:
-                for tc in chunk.tool_calls:
-                    yield json.dumps({"event": "tool_call", "id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args")}, default=str) + "\n"
-                continue
-            if hasattr(chunk, "type") and chunk.type == "tool":
-                content = getattr(chunk, "content", "")
-                yield json.dumps({"event": "tool_result", "result": str(content)[:500]}, default=str) + "\n"
-                continue
-            if hasattr(chunk, "type") and chunk.type in ("AIMessageChunk", "ai"):
-                content = getattr(chunk, "content", None)
-                if isinstance(content, str) and content:
-                    last_answer += content
-                    yield json.dumps({"event": "token", "content": content}) + "\n"
-                elif isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text = block.get("text", "")
-                            if text:
-                                last_answer += text
-                                yield json.dumps({"event": "token", "content": text}) + "\n"
+        try:
+            for event in agent.stream({"messages": [{"role": "user", "content": req.message}]}, config=_config(req.thread_id), stream_mode="messages"):
+                runnable, raw = event
+                chunk = runnable
+                if hasattr(chunk, "tool_calls") and chunk.tool_calls:
+                    for tc in chunk.tool_calls:
+                        yield json.dumps({"event": "tool_call", "id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args")}, default=str) + "\n"
+                    continue
+                if hasattr(chunk, "type") and chunk.type == "tool":
+                    content = getattr(chunk, "content", "")
+                    yield json.dumps({"event": "tool_result", "result": str(content)[:500]}, default=str) + "\n"
+                    continue
+                if hasattr(chunk, "type") and chunk.type in ("AIMessageChunk", "ai"):
+                    content = getattr(chunk, "content", None)
+                    if isinstance(content, str) and content:
+                        last_answer += content
+                        yield json.dumps({"event": "token", "content": content}) + "\n"
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "")
+                                if text:
+                                    last_answer += text
+                                    yield json.dumps({"event": "token", "content": text}) + "\n"
+        except Exception as e:
+            # A provider/agent error mid-stream must not kill the connection —
+            # emit it as an NDJSON event so the client can show it cleanly.
+            print(f"[stream error] {type(e).__name__}: {e}", flush=True)
+            yield json.dumps({"event": "error", "message": f"{type(e).__name__}: {e}"}) + "\n"
+        # Always end the stream with a terminal event — a missing final is what
+        # makes clients see "Response ended prematurely".
         yield json.dumps({"event": "final", "answer": last_answer}) + "\n"
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
+
+# ─── Memory endpoints (proxied to mem0_memory) ─────────────────────────────
+
+class MemoryAddRequest(BaseModel):
+    fact: str
+
+class MemorySearchRequest(BaseModel):
+    query: str
+    limit: int = 10
+
+class MemoryUpdateRequest(BaseModel):
+    memory_id: str
+    text: str
+
+class MemoryDeleteRequest(BaseModel):
+    memory_id: str
+
+@app.post("/memory/add")
+def memory_add(req: MemoryAddRequest):
+    if not req.fact.strip():
+        raise HTTPException(status_code=400, detail="fact must not be empty")
+    return {"id": mem_add(req.fact)}
+
+@app.post("/memory/search")
+def memory_search(req: MemorySearchRequest):
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="query must not be empty")
+    return {"results": mem_search(req.query, limit=req.limit)}
+
+@app.post("/memory/update")
+def memory_update(req: MemoryUpdateRequest):
+    ok = mem_update(req.memory_id, req.text)
+    return {"status": "ok" if ok else "not_found"}
+
+@app.post("/memory/delete")
+def memory_delete(req: MemoryDeleteRequest):
+    ok = mem_delete(req.memory_id)
+    return {"status": "ok" if ok else "not_found"}
+
+@app.get("/memory/list")
+def memory_list():
+    return {"results": mem_list()}
+
+@app.get("/memory/status")
+def memory_status():
+    return {"status": mem_status()}
 
 if __name__ == "__main__":
     import uvicorn

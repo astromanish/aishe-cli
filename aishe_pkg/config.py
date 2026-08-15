@@ -36,8 +36,24 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "model": "deepseek-v4-flash",
-    "provider": "",  # "" = Ollama (local/cloud via :11434), "opencode-go" = OpenCode Go relay
+    "provider": "",  # sarvam | ollama-cloud | local | openrouter | opencode-go
     "providers": {
+        "sarvam": {
+            "base_url": "https://api.sarvam.ai/v1",
+            "api_key": "",
+        },
+        "ollama-cloud": {
+            "base_url": "http://localhost:11434",
+            "api_key": "",
+        },
+        "local": {
+            "base_url": "http://localhost:8080",
+            "api_key": "",
+        },
+        "openrouter": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "",
+        },
         "opencode-go": {
             "base_url": "https://opencode.ai/zen/go/v1",
             "api_key": "",

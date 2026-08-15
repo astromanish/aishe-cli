@@ -51,38 +51,69 @@ def _stream_once(msg: str, tid: str) -> None:
     # Ensure thread exists and save user message
     thr_add_message(tid, "user", msg)
 
-    try:
-        r = requests.post(
-            f"{DEEPAGENT_URL}/stream",
-            json={"message": msg, "thread_id": tid},
-            stream=True,
-            timeout=120,
-        )
-        r.raise_for_status()
-    except requests.exceptions.ConnectionError:
-        print(red("Cannot reach DeepAgent on :8765."))
-        sys.exit(1)
+    # A dropped chunked stream mid-response (server restart, provider hiccup,
+    # timeout) used to crash with an unhandled ChunkedEncodingError. Retry only
+    # when nothing has been received yet; keep a partial answer otherwise.
+    MAX_ATTEMPTS = 3
 
-    answer = ""
-    for line in r.iter_lines():
-        if not line:
-            continue
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        etype = ev.get("event", "")
-        if etype == "token":
-            tok = ev.get("content", "")
-            print(tok, end="", flush=True)
-            answer += tok
-        elif etype == "tool_call":
-            print(yellow(f"\n  [tool: {ev.get('name', '?')}]"), flush=True)
-        elif etype == "tool_result":
-            print(dim(f"  [result: {ev.get('result', '')[:100]}]\n"), flush=True)
-        elif etype == "final":
-            if not answer:
-                answer = ev.get("answer", "")
+            r = requests.post(
+                f"{DEEPAGENT_URL}/stream",
+                json={"message": msg, "thread_id": tid},
+                stream=True,
+                timeout=120,
+            )
+            r.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            print(red("Cannot reach DeepAgent on :8765."))
+            sys.exit(1)
+
+        answer = ""
+        saw_event = False
+        try:
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = ev.get("event", "")
+                if etype == "token":
+                    tok = ev.get("content", "")
+                    print(tok, end="", flush=True)
+                    answer += tok
+                    saw_event = True
+                elif etype == "tool_call":
+                    print(yellow(f"\n  [tool: {ev.get('name', '?')}]"), flush=True)
+                    saw_event = True
+                elif etype == "tool_result":
+                    print(dim(f"  [result: {ev.get('result', '')[:100]}]\n"), flush=True)
+                    saw_event = True
+                elif etype == "error":
+                    print(red(f"\n  [stream error: {ev.get('message', 'unknown')}]"), flush=True)
+                elif etype == "final":
+                    if not answer:
+                        answer = ev.get("answer", "")
+            break  # clean end of stream
+        except requests.exceptions.ChunkedEncodingError:
+            # Server closed the chunked stream before sending a final event.
+            if saw_event and answer:
+                print(red("\n  [connection dropped — reply may be incomplete]"), flush=True)
+                break
+            if attempt < MAX_ATTEMPTS:
+                print(dim(f"\n  [connection dropped, retrying ({attempt}/{MAX_ATTEMPTS - 1})…]"), flush=True)
+                continue
+            print(red("\n  [connection dropped — no reply received]"), flush=True)
+            break
+        except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout):
+            if attempt < MAX_ATTEMPTS:
+                print(dim(f"\n  [connection lost, retrying ({attempt}/{MAX_ATTEMPTS - 1})…]"), flush=True)
+                continue
+            print(red("\n  [connection lost — no reply received]"), flush=True)
+            break
+
     if not answer:
         print(dim("(empty response)"))
     else:
@@ -507,113 +538,317 @@ def cmd_version(args: Any) -> None:
 
 # ─── Setup ──────────────────────────────────────────────────────────────────
 
-def cmd_setup(args: Any) -> None:
-    """Interactive setup — pick a model, apply it, restart DeepAgent.
+# Provider registry: config key → display info.
+#   - sarvam       Sarvam cloud API (OpenAI-compatible)
+#   - ollama-cloud Ollama :cloud models via the local Ollama server
+#   - local        llama.cpp llama-server (GGUF, OpenAI-compatible)
+#   - openrouter   OpenRouter (OpenAI-compatible)
+#   - opencode-go  OpenCode relay (OpenAI-compatible)
+SETUP_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "sarvam": {
+        "label": "Sarvam (cloud API)",
+        "base_url": "https://api.sarvam.ai/v1",
+        "needs_key": True,
+        "key_hint": "Get a key from https://dashboard.sarvam.ai (Settings → API Keys)",
+        "models_url": "/v1/models",
+        # Real Sarvam model IDs (fetched live when possible). The -conversations
+        # variant returns content directly; the base model is a reasoning model
+        # that puts output in reasoning_content and breaks OpenAI chat clients.
+        "fallback_models": ["sarvam-105b-conversations", "sarvam-105b"],
+    },
+    "ollama-cloud": {
+        "label": "Ollama cloud (:cloud models via local Ollama)",
+        "base_url": "http://localhost:11434",
+        "needs_key": False,
+        "key_default": "ollama",
+        "models_url": "/api/tags",
+        "ollama": True,
+    },
+    "local": {
+        "label": "Local llama.cpp (GGUF via llama-server)",
+        "base_url": "http://localhost:8080",
+        "needs_key": False,
+        "models_url": "/v1/models",
+        "llamacpp": True,
+    },
+    "openrouter": {
+        "label": "OpenRouter (cloud API)",
+        "base_url": "https://openrouter.ai/api/v1",
+        "needs_key": True,
+        "key_hint": "Get a key from https://openrouter.ai/keys",
+        "models_url": "/models",
+    },
+    "opencode-go": {
+        "label": "OpenCode (opencode.ai relay)",
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "needs_key": True,
+        "key_hint": "Get a key from https://opencode.ai",
+        "models_url": "/models",
+    },
+}
 
-    Supports two providers:
-      - provider "" (default): Ollama models (local + :cloud) via http://localhost:11434
-      - provider "opencode-go": models served by the OpenCode Go relay (opencode.ai)
-    """
-    from .config import get as cfg_get, set_key as cfg_set
-    from .util import check as util_check
+_PROVIDER_ORDER = ["sarvam", "ollama-cloud", "local", "openrouter", "opencode-go"]
 
-    ollama_url = cfg_get("services.ollama", "http://localhost:11434")
-    provider = cfg_get("provider", "") or ""
-    current = cfg_get("model", "deepseek-v4-flash")
 
-    header("Aishe Setup", "Choose a model")
-
-    # Provider banner
-    if provider == "opencode-go":
-        prov = cfg_get("providers.opencode-go", {}) or {}
-        base_url = prov.get("base_url") or "https://opencode.ai/zen/go/v1"
-        api_key = prov.get("api_key", "")
-        print(f"  Provider: {cyan('opencode-go')} {dim(base_url)}")
-        if not api_key:
-            print(yellow("  ⚠ No api_key set — run: aishe config set providers.opencode-go.api_key <key>"))
-    else:
-        print(f"  Provider: {cyan('Ollama')} {dim(ollama_url)}  (switch with: aishe config set provider opencode-go)")
-
-    # 1. List available models
-    section("Available Models")
-    models: List[str] = []
-    if provider == "opencode-go":
-        prov = cfg_get("providers.opencode-go", {}) or {}
-        api_key = prov.get("api_key", "")
-        base_url = (prov.get("base_url") or "https://opencode.ai/zen/go/v1").rstrip("/")
-        if api_key:
-            try:
-                r = requests.get(
-                    f"{base_url}/models",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=10,
-                )
-                r.raise_for_status()
-                models = sorted(m["id"] for m in r.json().get("data", []))
-            except Exception:
-                print(red("  Could not fetch models from opencode-go. Check api_key."))
-        else:
-            print(dim("  Set providers.opencode-go.api_key to list remote models."))
-    elif util_check(f"{ollama_url}/api/tags"):
-        try:
-            r = requests.get(f"{ollama_url}/api/tags", timeout=5)
-            models = sorted(m["name"] for m in r.json().get("models", []))
-        except Exception:
-            models = []
-    else:
-        print(red("  Ollama is not reachable. Is it running?"))
+def _setup_input(prompt: str) -> str:
+    """input() wrapper that exits cleanly on Ctrl+C/EOF."""
+    try:
+        return input(bold(prompt)).strip()
+    except (EOFError, KeyboardInterrupt):
+        print(red("\n  Setup cancelled."))
         sys.exit(1)
 
-    if models:
-        for m in models:
-            marker = "●" if m == current else "○"
-            print(f"  {marker} {cyan(m)}")
-        print(dim(f"\n  Current: {current}"))
-    else:
-        print(dim("  No models listed."))
 
-    # 2. Choose a model
-    section("Choose Model")
-    if models:
-        print("  Pick a number or type a model name:")
-        for i, m in enumerate(models, 1):
-            print(f"    [{i}] {m}")
+def _ensure_api_key(provider: str, info: Dict[str, Any]) -> str:
+    """Ensure an API key exists for a cloud provider; return the key in use."""
+    from .config import get as cfg_get, set_key as cfg_set
+
+    key = cfg_get(f"providers.{provider}.api_key", "")
+    if not info.get("needs_key"):
+        return key or info.get("key_default", "")
+    if key:
+        masked = (key[:4] + "…" + key[-4:]) if len(key) > 10 else "set"
+        print(f"  {green('✓')} API key already set: {dim(masked)}")
+        resp = _setup_input("  Change API key? (leave blank to keep) ▶ ")
+        if resp:
+            key = resp
+            cfg_set(f"providers.{provider}.api_key", key)
+            print(f"  {green('✓')} API key updated.")
+        return key
+    print(f"  {info.get('key_hint', 'Enter your API key')}")
+    key = _setup_input("  API key ▶ ")
+    if not key:
+        print(red("  API key required for this provider."))
+        sys.exit(1)
+    cfg_set(f"providers.{provider}.api_key", key)
+    print(f"  {green('✓')} API key saved.")
+    return key
+
+
+def _fetch_models(provider: str, info: Dict[str, Any], prov_cfg: Dict[str, Any]) -> List[str]:
+    """Fetch model IDs for a provider. Returns [] on any failure."""
+    base = (prov_cfg.get("base_url") or info["base_url"]).rstrip("/")
+    key = prov_cfg.get("api_key", "") or info.get("key_default", "")
+    try:
+        if info.get("ollama"):
+            r = requests.get(f"{base}/api/tags", timeout=6)
+            r.raise_for_status()
+            return sorted(m["name"] for m in r.json().get("models", []))
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        url = f"{base}{info.get('models_url', '/models')}"
+        r = requests.get(url, headers=headers, timeout=12)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        ids = [m.get("id", "") for m in data if m.get("id")]
+        return sorted(set(ids))
+    except Exception:
+        return []
+
+
+def _find_ggufs() -> List[str]:
+    """Find .gguf files in common model directories (bounded)."""
+    dirs = [
+        Path.home() / "models",
+        Path.home() / "Downloads",
+        Path.home() / "llama.cpp" / "models",
+        Path.home() / ".cache" / "llama.cpp",
+        Path("/opt/local/models"),
+        Path("/usr/local/models"),
+    ]
+    found: List[str] = []
+    for d in dirs:
+        if not d.is_dir():
+            continue
         try:
-            choice = input(bold("\n  Model ▶ ")).strip()
-        except (EOFError, KeyboardInterrupt):
-            print(red("\n  Setup cancelled."))
+            for p in d.rglob("*.gguf"):
+                found.append(str(p))
+                if len(found) >= 15:
+                    break
+        except Exception:
+            continue
+        if len(found) >= 15:
+            break
+    return found
+
+
+def _find_llama_server() -> Optional[str]:
+    exe = shutil.which("llama-server")
+    if exe:
+        return exe
+    for p in [
+        "/opt/homebrew/bin/llama-server",
+        "/usr/local/bin/llama-server",
+        str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-server"),
+    ]:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _setup_models() -> None:
+    """Provider → API key → model selection, then save + restart DeepAgent."""
+    from .config import get as cfg_get, set_key as cfg_set
+
+    current_provider = cfg_get("provider", "") or ""
+    current_model = cfg_get("model", "deepseek-v4-flash")
+
+    header("Aishe Setup", "Choose a provider")
+
+    # 1. Provider
+    section("Provider")
+    for i, name in enumerate(_PROVIDER_ORDER, 1):
+        info = SETUP_PROVIDERS[name]
+        marker = "●" if name == current_provider else "○"
+        print(f"  {marker} [{i}] {cyan(info['label'])}")
+    print(dim(f"\n  Current provider: {current_provider or 'unset'} · model: {current_model}"))
+
+    choice = _setup_input("  Provider ▶ ")
+    if not choice.isdigit() or not (1 <= int(choice) <= len(_PROVIDER_ORDER)):
+        print(red("  Invalid choice."))
+        sys.exit(1)
+    provider = _PROVIDER_ORDER[int(choice) - 1]
+    info = SETUP_PROVIDERS[provider]
+
+    # 2. API key (cloud providers)
+    section("API Key")
+    api_key = _ensure_api_key(provider, info)
+
+    # 3. Models
+    section("Available Models")
+    prov_cfg = dict(cfg_get(f"providers.{provider}", {}) or {})
+    prov_cfg.setdefault("base_url", info["base_url"])
+    prov_cfg.setdefault("api_key", api_key)
+
+    models: List[str] = []
+
+    if info.get("llamacpp"):
+        # llama.cpp: list the loaded model + GGUF files on disk
+        loaded = _fetch_models(provider, info, prov_cfg)
+        if loaded:
+            print(f"  Loaded in llama-server: {cyan(loaded[0])}")
+        ggufs = _find_ggufs()
+        if not ggufs:
+            print(dim("  No .gguf files found in common model dirs."))
+            gguf = _setup_input("  GGUF path (e.g. ~/models/qwen2.5-7b-q4.gguf) ▶ ")
+            if gguf:
+                models = [os.path.expanduser(gguf)]
+        else:
+            print("  GGUF files found:")
+            for i, g in enumerate(ggufs, 1):
+                print(f"    [{i}] {dim(os.path.basename(g))}  ({os.path.dirname(g)})")
+            gguf_choice = _setup_input("  Pick a GGUF, or paste a path ▶ ")
+            if gguf_choice.isdigit() and 1 <= int(gguf_choice) <= len(ggufs):
+                models = [ggufs[int(gguf_choice) - 1]]
+            elif gguf_choice:
+                models = [os.path.expanduser(gguf_choice.strip())]
+    else:
+        models = _fetch_models(provider, info, prov_cfg)
+        if models:
+            # Cloud providers can list hundreds (OpenRouter) — show a capped list,
+            # but any id can still be typed directly.
+            shown = models if len(models) <= 40 else models[:40]
+            for i, m in enumerate(shown, 1):
+                marker = "●" if m == current_model else "○"
+                print(f"  {marker} [{i}] {cyan(m)}")
+            if len(models) > 40:
+                print(dim(f"  … and {len(models) - 40} more — you can type any model id."))
+        else:
+            print(dim("  Could not fetch models — enter a model id manually."))
+
+    # 4. Select model
+    section("Select Model")
+    if models:
+        sel = _setup_input("  Model ▶ ")
+        if sel.isdigit() and 1 <= int(sel) <= len(models):
+            selected = models[int(sel) - 1]
+        elif sel:
+            selected = sel
+        else:
+            print(red("  No model chosen."))
             sys.exit(1)
     else:
-        try:
-            choice = input(bold("  Model name ▶ ")).strip()
-        except (EOFError, KeyboardInterrupt):
-            print(red("\n  Setup cancelled."))
+        # Manual entry for unreachable servers / typed ids
+        selected = _setup_input("  Model id (e.g. deepseek/deepseek-chat) ▶ ")
+        if not selected:
+            print(red("  No model chosen."))
             sys.exit(1)
 
-    selected = None
-    if choice.isdigit() and 1 <= int(choice) <= len(models):
-        selected = models[int(choice) - 1]
-    elif choice:
-        selected = choice.strip()
-    else:
-        selected = current
-
-    # Pull step is Ollama-only
-    if selected != current and provider != "opencode-go":
-        section("Pull Model")
-        print(f"  Pulling {cyan(selected)}...")
-        subprocess.run(["ollama", "pull", selected])
-        print(f"  {green('✓')} {selected} available")
-
-    # 3. Save to config
+    # 5. Save
     section("Save")
+    cfg_set("provider", provider)
     cfg_set("model", selected)
-    print(f"  {green('✓')} Saved model: {cyan(selected)}")
+    cfg_set(f"providers.{provider}.base_url", prov_cfg["base_url"])
+    cfg_set(f"providers.{provider}.api_key", api_key)
+    print(f"  {green('✓')} provider = {cyan(provider)}")
+    print(f"  {green('✓')} model    = {cyan(selected)}")
 
-    # 4. Restart DeepAgent to apply the model
+    # 6. Local llama.cpp — start/restart llama-server if needed
+    if info.get("llamacpp") and models:
+        server_bin = _find_llama_server()
+        if server_bin:
+            base = prov_cfg["base_url"].rstrip("/")
+            port = base.rsplit(":", 1)[-1] if ":" in base else "8080"
+            section("llama-server")
+            print(f"  Starting {cyan(server_bin)} with {dim(os.path.basename(selected))}…")
+            try:
+                lsof = subprocess.run(["lsof", "-t", f"-i:{port}"], capture_output=True, text=True, timeout=5)
+                for pid in lsof.stdout.split():
+                    subprocess.run(["kill", pid], check=False)
+            except Exception:
+                pass
+            env = dict(os.environ)
+            env["LLAMA_SERVER_PORT"] = port
+            subprocess.Popen(
+                [server_bin, "-m", selected, "-c", "4096", "--port", port, "--host", "127.0.0.1"],
+                stdout=open("/tmp/llamaserver.log", "a"),
+                stderr=subprocess.STDOUT,
+                env=env,
+            )
+            print(f"  {green('✓')} llama-server starting on :{port} (log: /tmp/llamaserver.log)")
+        else:
+            print(yellow("  llama-server binary not found — start it yourself, e.g.:"))
+            print(dim(f"    llama-server -m {selected} -c 4096 --port 8080"))
+
+    # 7. Restart DeepAgent to apply the provider + model
+    _restart_deepagent(provider, selected)
+
+    print()
+    print(f"  {green(bold('✓ Setup complete'))}  {cyan(provider)} / {cyan(selected)}")
+
+
+def _deepagent_env(provider: str, model: str, prov_cfg: Dict[str, Any]) -> Dict[str, str]:
+    """Build env vars for the DeepAgent sidecar from a provider config."""
+    from .config import get as cfg_get
+
+    env = dict(os.environ)
+    env["AISHE_MODEL"] = model
+    base = (prov_cfg.get("base_url") or SETUP_PROVIDERS[provider]["base_url"]).rstrip("/")
+    api_key = prov_cfg.get("api_key", "") or SETUP_PROVIDERS[provider].get("key_default", "")
+    if provider == "ollama-cloud":
+        env["AISHE_BASE_URL"] = f"{base}/v1"
+        env["AISHE_API_KEY"] = api_key or "ollama"
+    elif provider == "local":
+        env["AISHE_BASE_URL"] = f"{base}/v1"
+        env["AISHE_API_KEY"] = api_key or ""
+    else:
+        # OpenAI-compatible cloud providers: the SDK appends /chat/completions,
+        # so the base must end in /v1 (Sarvam needs it added explicitly).
+        env["AISHE_BASE_URL"] = base if base.endswith("/v1") else f"{base}/v1"
+        env["AISHE_API_KEY"] = api_key
+    # Backward compat for anything still reading the old variable
+    env["AISHE_OLLAMA_URL"] = env["AISHE_BASE_URL"]
+    # Embeddings always run on the local Ollama server, whatever the chat provider
+    env["AISHE_EMBED_URL"] = cfg_get("services.ollama", "http://localhost:11434")
+    return env
+
+
+def _restart_deepagent(provider: str, model: str) -> None:
+    """Stop and relaunch the DeepAgent sidecar with the new provider/model."""
+    from .config import get as cfg_get
+    from .util import check as util_check
+
     section("Restart DeepAgent")
     print("  Restarting DeepAgent to apply the model...")
-    # Locate the sidecar
     deepagent_dir = os.path.expanduser("~/.local/share/aishe-cli/deepagent")
     server_py = os.path.join(deepagent_dir, "server.py")
     venv_py = os.path.join(deepagent_dir, ".venv", "bin", "python")
@@ -623,7 +858,7 @@ def cmd_setup(args: Any) -> None:
         # killing the STT sidecar, whose cmdline is also `server.py`).
         try:
             lsof = subprocess.run(
-                ["lsof", "-t", f"+d", deepagent_dir],
+                ["lsof", "-t", "+d", deepagent_dir],
                 capture_output=True, text=True, timeout=5,
             )
             pids = [p for p in lsof.stdout.split() if p]
@@ -637,15 +872,8 @@ def cmd_setup(args: Any) -> None:
         except Exception:
             pass
 
-        env = dict(os.environ)
-        env["AISHE_MODEL"] = selected
-        env["AISHE_OLLAMA_URL"] = f"{ollama_url}/v1"
-        if provider == "opencode-go":
-            prov = cfg_get("providers.opencode-go", {}) or {}
-            env["AISHE_BASE_URL"] = (prov.get("base_url") or "https://opencode.ai/zen/go/v1").rstrip("/")
-            env["AISHE_API_KEY"] = prov.get("api_key", "")
-        else:
-            env["AISHE_API_KEY"] = "ollama"
+        prov_cfg = dict(cfg_get(f"providers.{provider}", {}) or {})
+        env = _deepagent_env(provider, model, prov_cfg)
         subprocess.Popen(
             [venv_py, server_py],
             stdout=open("/tmp/deepagent.log", "a"),
@@ -658,24 +886,23 @@ def cmd_setup(args: Any) -> None:
                 break
             import time as _t
             _t.sleep(1)
-        print(f"  {green('✓')} DeepAgent restarted with {cyan(selected)}")
+        print(f"  {green('✓')} DeepAgent restarted with {cyan(provider)} / {cyan(model)}")
     else:
-        print(yellow("  DeepAgent sidecar not found — model saved, will apply on next start."))
+        print(yellow("  DeepAgent sidecar not found — config saved, will apply on next start."))
 
-    print()
-    print(f"  {green(bold('✓ Setup complete'))}  Model: {cyan(selected)}")
 
-    # 5. Telegram bridge (optional)
-    section("Telegram Bridge")
-    from .config import get as cfg_get
-    have_token = bool(cfg_get("telegram.token", ""))
-    print(f"  Telegram: {green('configured') if have_token else red('not configured')}")
-    try:
-        want = input(bold("  Set up Telegram bridge? (y/N) ▶ ")).strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        want = "n"
-    if want in ("y", "yes"):
+def cmd_setup(args: Any) -> None:
+    """Interactive setup — configure models (provider/key/model) or Telegram bridge."""
+    header("Aishe Setup", "Configure model or Telegram")
+    section("What do you want to set up?")
+    print("  [1] Models — provider, API key, model selection")
+    print("  [2] Telegram bridge — bot token + allowed users")
+    choice = _setup_input("\n  Choice ▶ ")
+    if choice.strip() == "2":
         _setup_telegram()
+        print(f"\n  {green(bold('✓ Telegram setup complete'))}")
+        return
+    _setup_models()
 
 
 # ─── Telegram bridge ───────────────────────────────────────────────────────
@@ -913,7 +1140,7 @@ def main() -> None:
     sub.add_parser("doctor", help="Run comprehensive diagnostics")
 
     # setup
-    sub.add_parser("setup", help="Choose your Ollama model and restart DeepAgent")
+    sub.add_parser("setup", help="Configure model provider (Sarvam / Ollama cloud / llama.cpp / OpenRouter / OpenCode) or Telegram bridge")
 
     # telegram
     p_tg = sub.add_parser("telegram", help="Manage the Telegram bridge")

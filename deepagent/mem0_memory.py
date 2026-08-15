@@ -32,11 +32,18 @@ COLLECTION = os.environ.get("AISHE_MEMORY_COLLECTION", "aishe_memories")
 EMBED_MODEL = os.environ.get("AISHE_EMBED_MODEL", "qwen3-embedding:0.6b")
 EMBED_DIMS = int(os.environ.get("AISHE_EMBED_DIMS", "1024"))
 LLM_MODEL = os.environ.get("AISHE_MODEL", "deepseek-v4-flash:cloud")
-OLLAMA_URL = os.environ.get("AISHE_OLLAMA_URL", "http://localhost:11434")
-# Normalize: strip a trailing /v1 so the base works whether the env var has it or not.
-OLLAMA_BASE = OLLAMA_URL.rstrip("/")
-if OLLAMA_BASE.endswith("/v1"):
-    OLLAMA_BASE = OLLAMA_BASE[:-3]
+# The embedder MUST stay on the local Ollama server (qwen3-embedding) even when
+# the chat LLM is a cloud provider. AISHE_EMBED_URL is set by `aishe setup`;
+# default to the classic local Ollama base.
+EMBED_BASE = os.environ.get("AISHE_EMBED_URL", "http://localhost:11434").rstrip("/")
+if EMBED_BASE.endswith("/v1"):
+    EMBED_BASE = EMBED_BASE[:-3]
+# The LLM (fact extraction) follows the configured provider, same as agent.py:
+# AISHE_BASE_URL for cloud providers, or the local Ollama URL.
+LLM_RAW = os.environ.get("AISHE_BASE_URL") or os.environ.get("AISHE_OLLAMA_URL", "http://localhost:11434/v1")
+LLM_BASE = LLM_RAW.rstrip("/")
+if not LLM_BASE.endswith("/v1"):
+    LLM_BASE = f"{LLM_BASE}/v1"
 LLM_API_KEY = os.environ.get("AISHE_API_KEY", "ollama")
 
 os.environ.setdefault("MEM0_TELEMETRY", "false")
@@ -73,7 +80,7 @@ def _build_mem0():
                 "temperature": 0.1,
                 "max_tokens": 1024,
                 "api_key": LLM_API_KEY,
-                "openai_base_url": f"{OLLAMA_BASE}/v1",
+                "openai_base_url": LLM_BASE,
             },
         },
         "embedder": {
@@ -81,7 +88,7 @@ def _build_mem0():
             "config": {
                 "model": EMBED_MODEL,
                 "embedding_dims": EMBED_DIMS,
-                "ollama_base_url": OLLAMA_BASE,
+                "ollama_base_url": EMBED_BASE,
             },
         },
     }
@@ -114,7 +121,14 @@ def add(fact: str) -> str:
     m = _build_mem0()
     if m is not None and _qdrant_up():
         try:
-            m.add(fact, user_id="aishe")
+            res = m.add(fact, user_id="aishe")
+            # mem0 2.x returns {"results": [{"id": ..., "memory": ..., "event": ...}]}
+            try:
+                results = res.get("results", []) if isinstance(res, dict) else []
+                if results and isinstance(results[0], dict) and results[0].get("id"):
+                    return results[0]["id"]
+            except Exception:
+                pass
             return f"mem_{uuid.uuid4().hex}"
         except Exception as exc:  # noqa: BLE001
             _mem0_error = f"mem0 add failed: {exc}"
@@ -133,15 +147,16 @@ def search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
     m = _build_mem0()
     if m is not None and _qdrant_up():
         try:
-            results = m.search(query, user_id="aishe", limit=limit)
+            # mem0 2.x signature: search(query, top_k=, filters={"user_id": ...})
+            res = m.search(query, top_k=limit, filters={"user_id": "aishe"})
+            results = res.get("results", []) if isinstance(res, dict) else res
             out: List[Dict[str, Any]] = []
             for r in results:
                 mem = r.get("memory", "")
-                meta = r.get("metadata", {}) or {}
                 out.append({
-                    "id": meta.get("id", f"mem_{uuid.uuid4().hex}"),
+                    "id": r.get("id") or f"mem_{uuid.uuid4().hex}",
                     "fact": mem,
-                    "timestamp": meta.get("created_at", ""),
+                    "timestamp": r.get("created_at", ""),
                     "score": r.get("score"),
                 })
             return out
@@ -166,8 +181,98 @@ def search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
     return results[:limit]
 
 
+def update(memory_id: str, text: str) -> bool:
+    """Update a memory's text by ID (vector store; JSONL fallback)."""
+    m = _build_mem0()
+    if m is not None and _qdrant_up():
+        try:
+            m.update(memory_id, text=text)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _mem0_error = f"mem0 update failed: {exc}"
+    # Legacy JSONL fallback
+    if not LEGACY_FILE.exists():
+        return False
+    changed = False
+    entries = []
+    for line in LEGACY_FILE.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("id") == memory_id:
+            entry["fact"] = text
+            entry["updated_at"] = _now()
+            changed = True
+        entries.append(entry)
+    if changed:
+        MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        LEGACY_FILE.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+    return changed
+
+
+def delete(memory_id: str) -> bool:
+    """Delete a memory by ID (vector store; JSONL fallback)."""
+    m = _build_mem0()
+    if m is not None and _qdrant_up():
+        try:
+            m.delete(memory_id)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _mem0_error = f"mem0 delete failed: {exc}"
+    # Legacy JSONL fallback
+    if not LEGACY_FILE.exists():
+        return False
+    kept = []
+    removed = False
+    for line in LEGACY_FILE.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("id") == memory_id:
+            removed = True
+            continue
+        kept.append(entry)
+    if removed:
+        MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        LEGACY_FILE.write_text("\n".join(json.dumps(e) for e in kept) + "\n")
+    return removed
+
+
 def list_all() -> List[Dict[str, Any]]:
-    """List all memories (legacy JSONL only — mem0 has no simple list-all)."""
+    """List all memories — scrolls Qdrant directly (mem0 has no list-all)."""
+    if _qdrant_up():
+        try:
+            from qdrant_client import QdrantClient
+            client = QdrantClient(url=QDRANT_URL)
+            out: List[Dict[str, Any]] = []
+            offset = None
+            while True:
+                points, offset = client.scroll(
+                    collection_name=COLLECTION,
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for p in points:
+                    payload = p.payload or {}
+                    out.append({
+                        "id": p.id,
+                        "fact": payload.get("data", ""),
+                        "timestamp": payload.get("created_at", ""),
+                    })
+                if offset is None:
+                    break
+            return out
+        except Exception as exc:  # noqa: BLE001
+            _mem0_error = f"qdrant list failed: {exc}"
+            # fall through to legacy
     if not LEGACY_FILE.exists():
         return []
     entries: List[Dict[str, Any]] = []

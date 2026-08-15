@@ -8,7 +8,9 @@ from langchain_openai import ChatOpenAI
 from tools import calculator, get_current_time, word_stats, memory_search, memory_add, web_search, web_extract, run_command
 
 MODEL_NAME = os.environ.get("AISHE_MODEL", "deepseek-v4-flash:cloud")
-BASE_URL = os.environ.get("AISHE_OLLAMA_URL", "http://localhost:11434/v1")
+# AISHE_BASE_URL is set by `aishe setup` for every provider; AISHE_OLLAMA_URL is
+# kept for backward compatibility.
+BASE_URL = os.environ.get("AISHE_BASE_URL") or os.environ.get("AISHE_OLLAMA_URL", "http://localhost:11434/v1")
 API_KEY = os.environ.get("AISHE_API_KEY", "ollama")
 
 _model = ChatOpenAI(model=MODEL_NAME, base_url=BASE_URL, api_key=API_KEY, temperature=0.1)
