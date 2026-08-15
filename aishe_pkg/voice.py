@@ -88,6 +88,55 @@ def synthesize(text: str, voice: str = "F4", play: bool = True) -> Optional[str]
     return outpath
 
 
+# ─── Streaming (sentence-chunked) TTS ───────────────────────────────────────
+
+_SENT_SPLIT = re.compile(r'(?<=[.!?…])\s+')
+_MIN_CHUNK_CHARS = 8
+
+
+def split_sentences(text: str) -> List[str]:
+    """Split text into sentence chunks suitable for incremental TTS.
+
+    Keeps trailing punctuation attached to its sentence and drops empty chunks.
+    Long run-on segments (no sentence punctuation, e.g. lists/code) are still
+    broken up by commas or at a hard length cap so we never wait too long.
+    """
+    parts = _SENT_SPLIT.split(text.strip())
+    chunks: List[str] = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        # Break any remaining over-long fragment without sentence punctuation
+        while len(p) > 160:
+            cut = -1
+            for sep in (",", ";", "—", "-", " ", " "):
+                cut = p.rfind(sep, 0, 161)
+                if cut >= 80:
+                    break
+                cut = -1
+            if cut == -1:
+                cut = 160
+            chunks.append(p[:cut + 1].strip())
+            p = p[cut + 1:].strip()
+        chunks.append(p)
+    return chunks
+
+
+def speak_stream(text: str, voice: str = "F4") -> None:
+    """Synthesize + play a full response, but speak it sentence-by-sentence.
+
+    This lowers time-to-first-audio vs. waiting for the whole blob, and lets
+    a caller stream tokens and speak each completed sentence as it arrives.
+    For a single-shot string, it still chunks so long replies start sooner.
+    """
+    for chunk in split_sentences(text):
+        if not chunk:
+            continue
+        synthesize(chunk, voice=voice, play=True)
+
+
+
 def tts_health() -> bool:
     return check(f"{TTS_URL}/health")
 

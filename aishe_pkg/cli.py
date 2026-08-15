@@ -6,9 +6,11 @@ import argparse
 import json
 import os
 import platform
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -27,6 +29,8 @@ from .voice import (
     list_mic_devices,
     record_audio,
     record_with_vad,
+    speak_stream,
+    split_sentences,
     stt_health,
     synthesize,
     transcribe,
@@ -162,8 +166,7 @@ def cmd_live(args: Any) -> None:
     print(f"  STT: {green('Parakeet :5093')}  TTS: {green('Supertonic :8766')}  LLM: {green('DeepAgent :8765')}")
     print(f"  Voice: {cyan(voice)}  VAD: {cyan('on' if vad_enabled else 'off')}  Thread: {args.thread}")
     print()
-    print(dim("Press Enter to record, Ctrl+C to exit."))
-    print(dim("Or type a message and press Enter to chat without voice."))
+    print(dim("Press Enter to record and speak. Ctrl+C to exit."))
     print("─" * 50)
 
     tid = args.thread or "live"
@@ -238,10 +241,39 @@ def cmd_live(args: Any) -> None:
         answer = ""
         tool_calls: List[str] = []
         in_tool = False
+        spoken = set()
 
-        # Assistant prefix line
-        print(f"\n{cyan('##')} ", end="")
+        # ─── Voice-only response ───────────────────────────────────────────
+        # No chat text on screen. Tokens accumulate into a sentence buffer;
+        # each completed sentence is pushed to a single FIFO playback queue.
+        # ONE consumer thread drains it serially — sentences play one at a
+        # time, never overlapping. TTS still overlaps with the LLM streaming.
+        speak_voice = voice if (not args.no_tts) else None
 
+        audio_q: "queue.Queue[str]" = queue.Queue()
+
+        def _speak(sentence: str) -> None:
+            audio_q.put(sentence)
+
+        def _player() -> None:
+            # single consumer: pop one sentence, speak it fully, then the next
+            while True:
+                sentence = audio_q.get()
+                if sentence is None:
+                    audio_q.task_done()
+                    break
+                try:
+                    speak_stream(sentence, voice=voice)
+                except Exception:
+                    pass
+                finally:
+                    audio_q.task_done()
+
+        if speak_voice is not None:
+            threading.Thread(target=_player, daemon=True).start()
+
+        buf = ""
+        queued = 0
         for line in r.iter_lines():
             if not line:
                 continue
@@ -252,48 +284,64 @@ def cmd_live(args: Any) -> None:
 
             etype = ev.get("event", "")
             if etype == "tool_call":
-                name = ev.get("name", "?")
-                args_str = json.dumps(ev.get("args", {}), ensure_ascii=False)
-                tool_calls.append(name)
-                if not in_tool:
-                    print(f"\n{dim('```tools')}")
-                    in_tool = True
-                print(f"  {yellow('•')} {cyan(name)}({args_str})")
+                tool_calls.append(ev.get("name", "?"))
+                in_tool = True
             elif etype == "tool_result":
-                result = ev.get("result", "")
-                result_short = result[:200] + ("..." if len(result) > 200 else "")
-                print(f"    {dim('└─')} {result_short}")
+                in_tool = True
             elif etype == "token":
                 tok = ev.get("content", "")
-                if tok:
-                    print(tok, end="", flush=True)
-                    answer += tok
+                if not tok:
+                    continue
+                answer += tok
+                # live progress indicator
+                print(f"\r  {dim('▸ thinking')} {green(bold(str(len(answer))))} chars", end="", flush=True)
+                if speak_voice is None:
+                    continue
+                buf += tok
+                # Flush completed sentences. Guard: skip the final chunk so we
+                # don't double-speak it, and never buffer forever.
+                if len(buf) >= 300:
+                    _speak(buf)
+                    queued += 1
+                    buf = ""
+                else:
+                    for s in split_sentences(buf):
+                        if s in spoken:
+                            continue
+                        if buf.endswith(s):
+                            break  # incomplete — still buffering
+                        spoken.add(s)
+                        _speak(s)
+                        queued += 1
+                        buf = buf[len(s):]
             elif etype == "final":
                 if not answer:
                     answer = ev.get("answer", "")
+
+        # Speak any remaining tail (final partial sentence) if not already spoken
+        if speak_voice is not None:
+            for s in split_sentences(buf):
+                if s and s not in spoken:
+                    _speak(s)
+                    queued += 1
+            # if the model's answer arrived only via `final` (no tokens),
+            # speak the whole thing once
+            if not spoken and answer.strip():
+                _speak(answer)
+                queued += 1
 
         # Persist assistant turn
         if answer:
             thr_add_message(tid, "assistant", answer)
 
-        if in_tool:
-            print(dim("```"))
-        elif answer:
-            print()
-
-        if answer and not answer.endswith("\n"):
-            print()
-
-        # Close assistant turn
-        print(dim("─" * 50))
-
-        if not args.no_tts and answer.strip():
-            print(f"  {dim('🔊 Speaking...')}", end="", flush=True)
-            try:
-                synthesize(answer, voice=voice, play=True)
-                print(f"\r  {green('🔊 Spoken')}                    ")
-            except Exception as e:
-                print(f"\r  {yellow(f'TTS failed: {e}')}                    ")
+        # final progress indicator (thinking → speaking), clear the line
+        if speak_voice is not None:
+            audio_q.put(None)  # graceful stop signal for the player
+            print(f"\r  {dim('▸ speaking')} {green(bold(str(queued)))} phrases{' ' * 20}", end="", flush=True)
+            audio_q.join()     # wait for the queue to finish playing (silent drain)
+            print(f"\r  {green('✓')} replied — {green(bold(str(queued)))} phrases{' ' * 20}")
+        else:
+            print(f"\r  {green('✓')} replied — {dim(str(len(answer)) + ' chars')}{' ' * 20}")
 
 
 # ─── Doctor ─────────────────────────────────────────────────────────────────
@@ -460,39 +508,74 @@ def cmd_version(args: Any) -> None:
 # ─── Setup ──────────────────────────────────────────────────────────────────
 
 def cmd_setup(args: Any) -> None:
-    """Interactive setup — pick an Ollama model, pull it, apply it, restart DeepAgent."""
+    """Interactive setup — pick a model, apply it, restart DeepAgent.
+
+    Supports two providers:
+      - provider "" (default): Ollama models (local + :cloud) via http://localhost:11434
+      - provider "opencode-go": models served by the OpenCode Go relay (opencode.ai)
+    """
     from .config import get as cfg_get, set_key as cfg_set
     from .util import check as util_check
 
     ollama_url = cfg_get("services.ollama", "http://localhost:11434")
-    current = cfg_get("model", "deepseek-v4-flash:cloud")
+    provider = cfg_get("provider", "") or ""
+    current = cfg_get("model", "deepseek-v4-flash")
 
-    header("Aishe Setup", "Choose your Ollama model")
+    header("Aishe Setup", "Choose a model")
+
+    # Provider banner
+    if provider == "opencode-go":
+        prov = cfg_get("providers.opencode-go", {}) or {}
+        base_url = prov.get("base_url") or "https://opencode.ai/zen/go/v1"
+        api_key = prov.get("api_key", "")
+        print(f"  Provider: {cyan('opencode-go')} {dim(base_url)}")
+        if not api_key:
+            print(yellow("  ⚠ No api_key set — run: aishe config set providers.opencode-go.api_key <key>"))
+    else:
+        print(f"  Provider: {cyan('Ollama')} {dim(ollama_url)}  (switch with: aishe config set provider opencode-go)")
 
     # 1. List available models
     section("Available Models")
     models: List[str] = []
-    if util_check(f"{ollama_url}/api/tags"):
+    if provider == "opencode-go":
+        prov = cfg_get("providers.opencode-go", {}) or {}
+        api_key = prov.get("api_key", "")
+        base_url = (prov.get("base_url") or "https://opencode.ai/zen/go/v1").rstrip("/")
+        if api_key:
+            try:
+                r = requests.get(
+                    f"{base_url}/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=10,
+                )
+                r.raise_for_status()
+                models = sorted(m["id"] for m in r.json().get("data", []))
+            except Exception:
+                print(red("  Could not fetch models from opencode-go. Check api_key."))
+        else:
+            print(dim("  Set providers.opencode-go.api_key to list remote models."))
+    elif util_check(f"{ollama_url}/api/tags"):
         try:
             r = requests.get(f"{ollama_url}/api/tags", timeout=5)
             models = sorted(m["name"] for m in r.json().get("models", []))
         except Exception:
             models = []
-        if models:
-            for m in models:
-                marker = "●" if m == current else "○"
-                print(f"  {marker} {cyan(m)}")
-            print(dim(f"\n  Current: {current}"))
-        else:
-            print(dim("  No models pulled yet."))
     else:
         print(red("  Ollama is not reachable. Is it running?"))
         sys.exit(1)
 
+    if models:
+        for m in models:
+            marker = "●" if m == current else "○"
+            print(f"  {marker} {cyan(m)}")
+        print(dim(f"\n  Current: {current}"))
+    else:
+        print(dim("  No models listed."))
+
     # 2. Choose a model
     section("Choose Model")
     if models:
-        print("  Pick a number or type a model name (e.g. deepseek-v4-flash:cloud, llama3.2):")
+        print("  Pick a number or type a model name:")
         for i, m in enumerate(models, 1):
             print(f"    [{i}] {m}")
         try:
@@ -502,7 +585,7 @@ def cmd_setup(args: Any) -> None:
             sys.exit(1)
     else:
         try:
-            choice = input(bold("  Model name to pull ▶ ")).strip()
+            choice = input(bold("  Model name ▶ ")).strip()
         except (EOFError, KeyboardInterrupt):
             print(red("\n  Setup cancelled."))
             sys.exit(1)
@@ -515,7 +598,8 @@ def cmd_setup(args: Any) -> None:
     else:
         selected = current
 
-    if selected != current:
+    # Pull step is Ollama-only
+    if selected != current and provider != "opencode-go":
         section("Pull Model")
         print(f"  Pulling {cyan(selected)}...")
         subprocess.run(["ollama", "pull", selected])
@@ -556,7 +640,12 @@ def cmd_setup(args: Any) -> None:
         env = dict(os.environ)
         env["AISHE_MODEL"] = selected
         env["AISHE_OLLAMA_URL"] = f"{ollama_url}/v1"
-        env["AISHE_API_KEY"] = "ollama"
+        if provider == "opencode-go":
+            prov = cfg_get("providers.opencode-go", {}) or {}
+            env["AISHE_BASE_URL"] = (prov.get("base_url") or "https://opencode.ai/zen/go/v1").rstrip("/")
+            env["AISHE_API_KEY"] = prov.get("api_key", "")
+        else:
+            env["AISHE_API_KEY"] = "ollama"
         subprocess.Popen(
             [venv_py, server_py],
             stdout=open("/tmp/deepagent.log", "a"),
@@ -783,7 +872,7 @@ def main() -> None:
     # Bare `aishe` accepts an optional message (one-shot) or none (interactive).
     # Intercept before argparse: if the first arg isn't a known subcommand,
     # treat everything as a message.
-    _KNOWN = {"status", "live", "memory", "config", "doctor", "version", "setup", "telegram", "gateway", "dashboard", "-h", "--help"}
+    _KNOWN = {"status", "live", "memory", "config", "doctor", "version", "setup", "telegram", "gateway", "dashboard", "search", "-h", "--help"}
     _argv = sys.argv[1:]
     if _argv and _argv[0] not in _KNOWN:
         msg = " ".join(_argv)
@@ -806,9 +895,13 @@ def main() -> None:
     p_live.add_argument("--list", action="store_true", help="List mic devices and exit")
 
     # memory
-    p_mem = sub.add_parser("memory", help="Memory management")
-    p_mem.add_argument("action", choices=["add", "search", "list", "clear"], help="Memory action")
-    p_mem.add_argument("value", nargs="*", help="Fact text or search query")
+    p_mem = sub.add_parser("memory", help="Memory management (vector + short-term files)")
+    p_mem.add_argument("action", choices=["add", "search", "list", "clear", "status", "update", "delete", "seed", "soul", "user"], help="Memory action")
+    p_mem.add_argument("value", nargs="*", help="Fact text, search query, or <id> <new text>")
+
+    # search sessions
+    p_search = sub.add_parser("search", help="Search past conversations/sessions for any fact or topic")
+    p_search.add_argument("query", nargs="+", help="Search query")
 
     # config
     p_config = sub.add_parser("config", help="View/edit configuration")
@@ -894,6 +987,7 @@ def main() -> None:
         "status": cmd_status,
         "live": cmd_live,
         "memory": cmd_memory,
+        "search": cmd_search_sessions,
         "doctor": cmd_doctor,
         "setup": cmd_setup,
         "telegram": cmd_telegram,
@@ -903,6 +997,28 @@ def main() -> None:
     }
 
     dispatch[args.command](args)
+
+
+def cmd_search_sessions(args: Any = None) -> None:
+    """Search past sessions for a fact or topic."""
+    query = " ".join(args.query) if hasattr(args, "query") and args.query else ""
+    if not query:
+        print(red("Usage: aishe search <query>"))
+        sys.exit(1)
+    from .threads import search_sessions
+    results = search_sessions(query)
+    if not results:
+        print(dim(f"No matches for '{query}' in past sessions."))
+        return
+    print(bold(f"Found {len(results)} match(es) for '{query}':"))
+    print("─" * 60)
+    for r in results:
+        who = "You" if r.get("role") == "user" else "Aishe"
+        ts = (r.get("timestamp") or "")[:16]
+        title = r.get("title") or r.get("thread_id")
+        content = (r.get("content") or "").replace("\n", " ")
+        print(f"  {bullet(f'[{title}]')} {dim(ts)} {bold(who)}: {content[:200]}")
+    print(dim(f"\n{len(results)} hit(s) across all sessions (SQLite FTS5)"))
 
 
 def cmd_status(args: Any = None) -> None:
@@ -938,4 +1054,9 @@ def cmd_status(args: Any = None) -> None:
     mem_cnt = mem_count()
     thr_cnt = thr_count()
     print(f"  {bullet('Memory')} {cyan(str(mem_cnt))} {dim('entries')}")
-    print(f"  {bullet('Threads')} {cyan(str(thr_cnt))} {dim('conversations')}")
+    print(f"  {bullet('Threads')} {cyan(str(thr_cnt))} {dim('conversations (SQLite)')}")
+    try:
+        from .memory import status as mem_status
+        print(f"  {bullet('Mem backend')} {cyan(mem_status())}")
+    except Exception:
+        pass
