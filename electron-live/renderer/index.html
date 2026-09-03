@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Aishe Live</title>
+<style>
+  :root {
+    --bg: #0c0c0c;
+    --panel: #141412;
+    --ink: #e8e4dd;
+    --muted: #a09a8e;
+    --dim: #6b675e;
+    --amber: #d4a24e;
+    --red: #c05b4d;
+    --border: #26261f;
+    --mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    --sans: "Inter", -apple-system, system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    overflow: hidden;
+    display: flex;
+    justify-content: center;
+    user-select: none;
+    -webkit-app-region: drag; /* drag anywhere to move the window */
+  }
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+    pointer-events: none; z-index: 0;
+  }
+  .wrap { position: relative; z-index: 1; width: 100%; max-width: none; height: 100%; padding: 22px 18px 24px; display: grid; grid-template-columns: minmax(0, 0.28fr) minmax(0, 0.9fr) minmax(0, 0.62fr); grid-template-rows: auto minmax(0, 1fr); column-gap: 18px; row-gap: 18px; overflow: hidden; }
+  .topbar { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; min-height: 26px; color: var(--muted); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; -webkit-app-region: no-drag; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+  .brand { color: var(--ink); }
+  .mic-state { display: flex; align-items: center; gap: 6px; color: var(--muted); border: 0; padding: 4px 6px; background: transparent; }
+  .mic-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px rgba(212,162,78,.12); }
+  .mic-state.muted .mic-dot { background: var(--dim); box-shadow: none; }
+  .stage { grid-column: 1; grid-row: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding: 18px 14px; border-right: 1px solid var(--border); }
+  .center-pane { grid-column: 2; grid-row: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+  .agent-pane { grid-column: 3; grid-row: 2; display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; overflow: hidden; padding-left: 4px; }
+  .agent-rail { width: 100%; height: 20%; min-height: 54px; max-height: 20%; border: 1px solid var(--border); border-left: 2px solid var(--amber); background: rgba(20,20,18,.76); padding: 9px 12px; margin: 0; overflow: hidden; -webkit-app-region: no-drag; flex: 0 0 20%; }
+
+  .agent-head { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+  .agent-head .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px rgba(212,162,78,.14); }
+  .agent-head .label { color: var(--dim); font: 9px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+  .agent-now { display: flex; gap: 8px; align-items: baseline; }
+  .agent-icon { color: var(--amber); font: 14px var(--mono); min-width: 14px; }
+  .agent-copy { color: var(--ink); font: 12px var(--mono); font-weight: 600; }
+  .agent-detail, .agent-meta, .resource-strip { display: none; }
+  .agent-rail.has-error .agent-detail { display: block; color: var(--red); font: 10px/1.35 var(--mono); margin: 4px 0 0 22px; overflow-wrap: anywhere; }
+  .agent-rail.has-error .agent-copy { color: var(--red); }
+  .card { width: 100%; border: 1px solid var(--border); padding: 12px 15px; margin: 0; background: #11110f; -webkit-app-region: no-drag; flex: 0 0 auto; }
+  .stage .completion-card { width: 100%; max-width: 250px; margin-top: 14px; }
+  .card[hidden] { display: none; }
+  .card-kicker { color: var(--amber); font: 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  .card-title { color: var(--ink); font: 12px var(--mono); margin-top: 6px; }
+  .card-copy { color: var(--muted); font: 10px/1.45 var(--mono); margin-top: 5px; }
+  .card-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .card-actions button { padding: 5px 9px; font-size: 10px; }
+  .approval-card { border-left: 2px solid var(--red); }
+  .approval-card .card-kicker { color: var(--red); }
+
+  #close {
+    position: absolute; top: 8px; right: 10px; z-index: 5;
+    background: transparent; border: none; cursor: pointer;
+    color: var(--dim); font-size: 18px; line-height: 1; padding: 4px 6px;
+    -webkit-app-region: no-drag;
+  }
+  #close:hover { color: var(--red); }
+
+  #pet { width: 192px; height: 228px; image-rendering: pixelated; }
+  .status { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 6px; min-height: 34px;
+            font-family: var(--mono); font-size: 10px; line-height: 1.45; text-align: center; }
+  .s-main { color: var(--muted); }
+  .s-tool { color: var(--amber); word-break: break-word; }
+  .s-tool.done { color: var(--dim); }
+
+  .controls { display: flex; gap: 10px; margin: 16px 0 4px; -webkit-app-region: no-drag; }
+  button {
+    font-family: var(--mono); font-size: 12px; cursor: pointer;
+    padding: 9px 16px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--muted);
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    -webkit-user-select: none; user-select: none; touch-action: none;
+  }
+  button:hover { color: var(--ink); border-color: var(--dim); }
+
+
+  .hint { font-family: var(--mono); font-size: 10px; color: var(--dim); min-height: 14px; margin: 0; padding: 0 2px; -webkit-app-region: no-drag; }
+
+  .activity {
+    width: 100%; flex: 1 1 auto; min-height: 0; margin: 0;
+    border: 1px solid var(--border); border-left: 2px solid var(--amber);
+    background: rgba(20,20,18,.5); padding: 8px 11px;
+    overflow-y: auto; font-family: var(--mono); font-size: 10px;
+    display: flex; flex-direction: column; gap: 5px; -webkit-app-region: no-drag;
+  }
+  .activity:empty { display: none; }
+  .activity .feed-row { display: flex; align-items: flex-start; gap: 8px; min-width: 0; line-height: 1.45; overflow-wrap: anywhere; }
+  .activity .feed-row .t { color: var(--dim); }
+  .activity .feed-row .t { flex: 0 0 28px; }
+  .activity .feed-row .txt { min-width: 0; overflow-wrap: anywhere; }
+  .activity .feed-row.stage .txt { color: var(--muted); font-weight: 600; letter-spacing: .04em; }
+  .activity .feed-row.stage .badge { color: var(--amber); margin-right: 6px; }
+  .activity .feed-row.tool_start .txt { color: var(--ink); }
+  .activity .feed-row.tool_start .ico { color: var(--amber); margin-right: 6px; }
+  .activity .feed-row.tool_end .txt { color: var(--muted); }
+  .activity .feed-row.tool_end .ms { color: var(--dim); margin-left: 8px; }
+  .activity .feed-row.tool_end .res { color: var(--dim); display: block; margin-left: 20px; white-space: pre-wrap; }
+  .activity .feed-row.error .txt { color: var(--red); }
+  .activity .feed-row.done .txt { color: var(--amber); font-weight: 600; }
+
+  .chat {
+    width: 100%; flex: 1 1 auto; min-height: 0; margin: 0;
+    border: 1px solid var(--border); border-top: 1px solid var(--border); padding: 14px 14px;
+    overflow-y: auto; font-family: var(--mono); font-size: 11px;
+    display: flex; flex-direction: column; gap: 11px;
+    -webkit-app-region: no-drag;
+  }
+  .t { line-height: 1.5; word-break: break-word; }
+  .t .who { display: inline-block; min-width: 40px; }
+  .t.you .who { color: var(--dim); }
+  .t.aishe .who { color: var(--amber); }
+  .t.err { color: var(--red); }
+  .t .sbody { white-space: pre-wrap; }
+  .cur { color: var(--amber); animation: blink 0.9s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .chat:empty::before { content: "transcript will appear here"; color: var(--dim); }
+  @media (max-width: 900px) {
+    .wrap { grid-template-columns: 1fr; grid-template-rows: auto auto auto auto; column-gap: 0; }
+    .stage { grid-column: 1; grid-row: 2; min-height: 250px; border-right: 0; border-bottom: 1px solid var(--border); }
+    .center-pane { grid-column: 1; grid-row: 3; }
+    .agent-pane { grid-column: 1; grid-row: 4; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <button id="close" title="close">×</button>
+
+  <div class="topbar">
+    <span class="brand">AISHE / LIVE</span>
+    <button id="mute" class="mic-state" title="mute microphone"><span class="mic-dot"></span><span id="mic-label">MIC ACTIVE</span></button>
+  </div>
+
+  <div class="stage">
+    <canvas id="pet" width="192" height="228"></canvas>
+    <div class="status">
+      <div class="s-main" id="status-main"></div>
+      <div class="s-tool" id="status-tool"></div>
+    </div>
+    <section class="card completion-card" id="completion-card" hidden>
+      <div class="card-kicker">✓ finished while you were away</div>
+      <div class="card-title" id="completion-title">Aishe has something for you</div>
+      <div class="card-copy" id="completion-copy"></div>
+      <div class="card-actions"><button id="completion-open">open result</button><button id="completion-dismiss">dismiss</button></div>
+    </section>
+  </div>
+
+  <div class="center-pane">
+    <div class="chat" id="chat"></div>
+  </div>
+
+  <div class="agent-pane">
+    <section class="agent-rail" id="agent-rail" aria-live="polite">
+      <div class="agent-head"><span class="pulse"></span><span class="label">◈ LIVE</span></div>
+      <div class="agent-now"><span class="agent-icon" id="agent-icon">◉</span><span class="agent-copy" id="agent-copy">ready</span></div>
+      <div class="agent-detail" id="agent-detail">context ready · speak anytime</div>
+      <span class="agent-meta" id="agent-meta">ready</span>
+      <div class="resource-strip" id="resource-strip"><span id="resource-model">local agent</span><span id="resource-tools">0 tools</span><span id="resource-time">0.0s</span></div>
+    </section>
+
+    <section class="card approval-card" id="approval-card" hidden>
+      <div class="card-kicker">approval needed</div>
+      <div class="card-title" id="approval-title">Aishe is ready to act</div>
+      <div class="card-copy" id="approval-copy"></div>
+      <div class="card-actions"><button id="approval-allow">allow</button><button id="approval-cancel">not now</button></div>
+    </section>
+
+    <div class="hint" id="hint"></div>
+    <div class="activity" id="activity"></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

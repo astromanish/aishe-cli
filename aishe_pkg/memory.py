@@ -204,7 +204,7 @@ def _ensure_files() -> None:
     if not SOUL_FILE.exists():
         SOUL_FILE.write_text(
             "# Aishe — Soul\n\n"
-            "You are Aishe, a warm, efficient voice-first AI assistant for India.\n"
+            "You are Aishe, a warm, efficient privacy-first AI assistant for India.\n"
             "Be concise, helpful, and honest. Use memory to remember the user.\n"
         )
     if not USER_FILE.exists():

@@ -1,0 +1,15 @@
+{
+  "name": "aishe-live",
+  "productName": "Aishe Live",
+  "version": "1.0.0",
+  "description": "Native lite Electron app for aishe live — pixel pet voice assistant (push-to-talk + always-listening live voice).",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

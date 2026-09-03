@@ -73,6 +73,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "vad_min_speech_duration_ms": 250,
         "vad_min_silence_duration_ms": 500,
     },
+    "live": {
+        "silence_ms": 500,        # live voice: reply after this much silence (Electron pet)
+        "min_speech_ms": 250,     # live voice: speech must last this long to count
+        "rms_threshold": 0.018,   # live voice: mic RMS level that counts as speech
+    },
     "data": {
         "dir": _default_data_dir(),
     },

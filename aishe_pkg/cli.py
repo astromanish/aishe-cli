@@ -140,7 +140,7 @@ def cmd_repl_stream(args: Any) -> None:
         return
 
     # Interactive loop
-    print(bold("💬 Aishe — streaming chat"))
+    print(bold("aishe — streaming chat"))
     print(dim("Type a message and press Enter. Ctrl+C or /exit to quit."))
     print(dim("─" * 50))
 
@@ -164,6 +164,45 @@ def cmd_repl_stream(args: Any) -> None:
 # ─── Live Voice ──────────────────────────────────────────────────────────────
 
 def cmd_live(args: Any) -> None:
+    """`aishe live` — native Electron lite app (pixel pet); --cli keeps the terminal REPL."""
+    if getattr(args, "cli", False):
+        _cmd_live_cli(args)
+    else:
+        _launch_electron_live(args)
+
+
+def _launch_electron_live(args: Any) -> None:
+    """Launch the Aishe Live Electron lite app — a native pixel-pet window.
+
+    The app talks directly to DeepAgent/Parakeet/Supertonic from its main
+    process — no localhost web server involved. Requires one-time
+    `cd electron-live && npm install` (setup.sh does this automatically).
+    """
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "electron-live"),
+        os.path.expanduser("~/.local/share/aishe-cli/electron-live"),
+    ]
+    app_dir = next((c for c in candidates if os.path.isdir(c)), None)
+    if not app_dir:
+        print(red("Aishe Live app not found."))
+        print(dim("  Run: cd electron-live && npm install   (or rerun setup.sh)"))
+        sys.exit(1)
+
+    electron = os.path.join(app_dir, "node_modules", ".bin", "electron")
+    if not os.path.exists(electron):
+        print(red("Aishe Live app not installed."))
+        print(dim(f"  Run: cd {app_dir} && npm install"))
+        sys.exit(1)
+
+    print(f"  Launching Aishe Live ({dim(app_dir)})")
+    subprocess.Popen(
+        [electron, app_dir],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _cmd_live_cli(args: Any) -> None:
     if not stt_health():
         print(red("Parakeet STT is down on :5093"))
         sys.exit(1)
@@ -192,9 +231,9 @@ def cmd_live(args: Any) -> None:
     duration = args.duration or get("voice.recording_duration", 5)
     voice = args.voice or get("voice.default_voice", "F4")
 
-    print(bold("🎤 Live Voice Mode"))
+    print(bold("Live Voice Mode"))
     print(f"  Mic: {cyan(f'[{device_idx}]')} {dict(devices).get(device_idx, '?')}")
-    print(f"  STT: {green('Parakeet :5093')}  TTS: {green('Supertonic :8766')}  LLM: {green('DeepAgent :8765')}")
+    print(f"  STT: {green('Parakeet')}  TTS: {green('Supertonic')}  LLM: {green('DeepAgent')}")
     print(f"  Voice: {cyan(voice)}  VAD: {cyan('on' if vad_enabled else 'off')}  Thread: {args.thread}")
     print()
     print(dim("Press Enter to record and speak. Ctrl+C to exit."))
@@ -1083,7 +1122,7 @@ def cmd_gateway_logs(args: Any) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="aishe",
-        description="Aishe CLI — voice-first AI assistant for your terminal",
+        description="Aishe CLI — privacy-first AI assistant for your terminal",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   aishe                         — interactive streaming chat
@@ -1112,14 +1151,15 @@ def main() -> None:
     sub.add_parser("status", help="Check all service statuses")
 
     # live
-    p_live = sub.add_parser("live", help="Live voice conversation (record → STT → think → TTS)")
-    p_live.add_argument("-d", "--device", type=int, default=None, help="Mic device index")
+    p_live = sub.add_parser("live", help="Live voice — native Electron pixel-pet app (default) or terminal REPL (--cli)")
+    p_live.add_argument("-d", "--device", type=int, default=None, help="Mic device index (terminal REPL mode)")
     p_live.add_argument("--duration", type=int, default=None, help="Recording duration in seconds (default: config)")
     p_live.add_argument("-t", "--thread", default="live", help="Thread ID")
     p_live.add_argument("-V", "--voice", default=None, help="TTS voice (F1-F5, M1-M5)")
     p_live.add_argument("--no-tts", action="store_true", help="Don't speak responses")
     p_live.add_argument("--no-vad", action="store_true", help="Disable VAD (use fixed duration)")
     p_live.add_argument("--list", action="store_true", help="List mic devices and exit")
+    p_live.add_argument("--cli", action="store_true", help="Terminal voice REPL (press Enter to record) instead of the Electron app")
 
     # memory
     p_mem = sub.add_parser("memory", help="Memory management (vector + short-term files)")

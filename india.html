@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>India Sovereign AI Infrastructure Telemetry</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+    body {
+      background-color: #030712;
+      color: #f3f4f6;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+    }
+    #canvas-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+    }
+    /* UI Overlay */
+    .hud-overlay {
+      position: absolute;
+      z-index: 10;
+      pointer-events: none;
+    }
+    .interactive {
+      pointer-events: auto;
+    }
+    /* Header */
+    header {
+      top: 20px;
+      left: 24px;
+    }
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      background: #22c55e;
+      border-radius: 50%;
+      box-shadow: 0 0 10px #22c55e;
+    }
+    .subtitle {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      margin-top: 4px;
+      letter-spacing: 0.02em;
+    }
+    /* Top Right Global Stats */
+    .global-stats {
+      top: 20px;
+      right: 24px;
+      display: flex;
+      gap: 12px;
+    }
+    .stat-card {
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid rgba(56, 189, 248, 0.2);
+      backdrop-filter: blur(12px);
+      padding: 10px 16px;
+      border-radius: 8px;
+      min-width: 130px;
+    }
+    .stat-label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      color: #94a3b8;
+      margin-bottom: 2px;
+    }
+    .stat-val {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #f8fafc;
+    }
+    .stat-val span {
+      font-size: 0.75rem;
+      color: #38bdf8;
+      margin-left: 2px;
+    }
+    /* Layer Filter Controls */
+    .controls-bar {
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(16px);
+      padding: 6px;
+      border-radius: 12px;
+    }
+    .filter-btn {
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .filter-btn:hover {
+      color: #f8fafc;
+      background: rgba(255, 255, 255, 0.05);
+    }
+    .filter-btn.active {
+      background: #0284c7;
+      color: #ffffff;
+      box-shadow: 0 0 12px rgba(2, 132, 199, 0.5);
+    }
+    /* Side Inspector Panel */
+    .inspector-panel {
+      bottom: 90px;
+      left: 24px;
+      width: 320px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      backdrop-filter: blur(16px);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+      transition: opacity 0.3s ease;
+    }
+    .node-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #f8fafc;
+      margin-bottom: 2px;
+    }
+    .node-type {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      color: #38bdf8;
+      font-weight: 600;
+      margin-bottom: 12px;
+      display: inline-block;
+    }
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 0.75rem;
+    }
+    .metric-name {
+      color: #94a3b8;
+    }
+    .metric-data {
+      color: #f1f5f9;
+      font-weight: 600;
+    }
+    .instruction-hint {
+      position: absolute;
+      bottom: 24px;
+      right: 24px;
+      font-size: 0.7rem;
+      color: #64748b;
+      background: rgba(15, 23, 42, 0.5);
+      padding: 6px 10px;
+      border-radius: 6px;
+    }
+  </style>
+  <!-- Three.js and OrbitControls via CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+
+  <!-- WebGL Render Target -->
+  <div id="canvas-container"></div>
+
+  <!-- Telemetry HUD Overlays -->
+  <header class="hud-overlay">
+    <h1><span class="status-dot"></span> Bharat AI Telemetry</h1>
+    <div class="subtitle">Real-time Physical Infrastructure & Sovereign Compute Stack</div>
+  </header>
+
+  <div class="hud-overlay global-stats">
+    <div class="stat-card">
+      <div class="stat-label">Grid Load Target</div>
+      <div class="stat-val">26.3<span>GW</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">DC Installed</div>
+      <div class="stat-val">1.6<span>GW</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">IndiaAI GPUs</div>
+      <div class="stat-val">45,000<span>+</span></div>
+    </div>
+  </div>
+
+  <div class="hud-overlay inspector-panel interactive" id="inspector">
+    <div class="node-title" id="node-title">Delhi-NCR Cluster</div>
+    <div class="node-type" id="node-type">Hyperscale Compute Node</div>
+    <div class="metric-row">
+      <span class="metric-name">Active DC Power:</span>
+      <span class="metric-data" id="metric-power">380 MW</span>
+    </div>
+    <div class="metric-row">
+      <span class="metric-name">GPU Node Capacity:</span>
+      <span class="metric-data" id="metric-gpu">12,500 Accel.</span>
+    </div>
+    <div class="metric-row">
+      <span class="metric-name">Primary Source:</span>
+      <span class="metric-data" id="metric-source">Thermal / Grid Blend</span>
+    </div>
+    <div class="metric-row">
+      <span class="metric-name">Transit / Routing:</span>
+      <span class="metric-data" id="metric-export">Domestic & SaaS LLM</span>
+    </div>
+  </div>
+
+  <div class="hud-overlay controls-bar interactive">
+    <button class="filter-btn active" data-filter="all">All Layers</button>
+    <button class="filter-btn" data-filter="compute">Compute & GPUs</button>
+    <button class="filter-btn" data-filter="datacenter">Data Centers</button>
+    <button class="filter-btn" data-filter="energy">Power & Grid</button>
+    <button class="filter-btn" data-filter="network">Subsea & Fiber</button>
+  </div>
+
+  <div class="hud-overlay instruction-hint">
+    Left Click + Drag: Rotate | Scroll: Zoom | Click Marker: Inspect
+  </div>
+
+  <script>
+    // --- Infrastructure Dataset ---
+    // Coordinates normalized to custom 3D map space (x: West->East, z: North->South)
+    const infraNodes = [
+      {
+        id: 'delhi',
+        name: 'Delhi-NCR Cluster',
+        type: 'compute',
+        typeLabel: 'Hyperscale Compute Node',
+        x: 0.5, z: -3.5, y: 0.2,
+        color: 0x38bdf8,
+        power: '380 MW',
+        gpu: '12,500 Accelerators',
+        source: 'Northern Regional Grid',
+        export: 'Enterprise SaaS & Sovereign AI'
+      },
+      {
+        id: 'mumbai',
+        name: 'Mumbai & Navi Mumbai',
+        type: 'datacenter',
+        typeLabel: 'Primary Hyperscale & Subsea Hub',
+        x: -2.8, z: 0.8, y: 0.2,
+        color: 0x06b6d4,
+        power: '780 MW (Active & Pipeline)',
+        gpu: '18,200 Accelerators',
+        source: 'Dedicated HVDC Feed',
+        export: 'AAE-1 / SEA-ME-WE-5 Gateway'
+      },
+      {
+        id: 'bengaluru',
+        name: 'Bengaluru Innovation Node',
+        type: 'compute',
+        typeLabel: 'Silicon Design & AI Cluster',
+        x: -0.6, z: 3.4, y: 0.2,
+        color: 0x38bdf8,
+        power: '220 MW',
+        gpu: '8,400 Accelerators',
+        source: 'Green Energy Open Access',
+        export: 'Semiconductor IP & Multi-Agent SaaS'
+      },
+      {
+        id: 'hyderabad',
+        name: 'Hyderabad Cyber Hub',
+        type: 'datacenter',
+        typeLabel: 'Hyperscale Campus Hub',
+        x: -0.2, z: 1.6, y: 0.2,
+        color: 0x06b6d4,
+        power: '310 MW',
+        gpu: '6,200 Accelerators',
+        source: 'Southern Grid Corridor',
+        export: 'Regional Enterprise Cloud'
+      },
+      {
+        id: 'chennai',
+        name: 'Chennai Coastal Gateway',
+        type: 'network',
+        typeLabel: 'Subsea Cable & DC Corridor',
+        x: 0.6, z: 3.5, y: 0.2,
+        color: 0xec4899,
+        power: '260 MW',
+        gpu: '4,100 Accelerators',
+        source: 'Grid + Dedicated Wind Link',
+        export: 'East Asia Transit & Undersea Cables'
+      },
+      {
+        id: 'rajasthan',
+        name: 'Rajasthan Solar Corridor',
+        type: 'energy',
+        typeLabel: 'Green Energy AI Feeder',
+        x: -2.0, z: -2.5, y: 0.2,
+        color: 0x22c55e,
+        power: '5.2 GW Solar Capacity',
+        gpu: 'Grid Interconnect Only',
+        source: 'Bhadla & Thar Solar Parks',
+        export: 'Green Electron Transmission to DCs'
+      },
+      {
+        id: 'kolkata',
+        name: 'Kolkata Eastern Node',
+        type: 'network',
+        typeLabel: 'Eastern Edge & Cross-Border Hub',
+        x: 4.0, z: -0.8, y: 0.2,
+        color: 0xec4899,
+        power: '95 MW',
+        gpu: '1,800 Accelerators',
+        source: 'Eastern Grid Intertie',
+        export: 'Regional ASEAN Fiber Edge'
+      },
+      {
+        id: 'gujarat',
+        name: 'Gujarat / GIFT City / Jamnagar',
+        type: 'energy',
+        typeLabel: 'Next-Gen Ultra Hyperscale Site',
+        x: -3.6, z: -1.0, y: 0.2,
+        color: 0x22c55e,
+        power: '450 MW (Target)',
+        gpu: 'Planned 10k GPU Mega-Cluster',
+        source: 'Hybrid Wind-Solar Parks',
+        export: 'High-Density Cooled AI Training'
+      }
+    ];
+
+    // --- Scene, Camera, Renderer Setup ---
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x030712, 0.05);
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 14, 12);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x030712, 1);
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.maxPolarAngle = Math.PI / 2.1;
+    controls.minDistance = 6;
+    controls.maxDistance = 25;
+    controls.target.set(0, 0, 0);
+
+    // --- Ambient & Directional Lights ---
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0x38bdf8, 1.2);
+    dirLight.position.set(5, 12, 5);
+    scene.add(dirLight);
+
+    // --- Grid Base Floor ---
+    const gridHelper = new THREE.GridHelper(30, 40, 0x0284c7, 0x1e293b);
+    gridHelper.position.y = -0.05;
+    scene.add(gridHelper);
+
+    // --- Stylized India Base Geometry ---
+    // Approximate landmass polygonal profile
+    const indiaShape = new THREE.Shape();
+    indiaShape.moveTo(0.5, -5.2);   // North (Kashmir)
+    indiaShape.lineTo(2.2, -3.8);   // Uttarakhand/Nepal border
+    indiaShape.lineTo(4.5, -2.5);   // Northeast entry
+    indiaShape.lineTo(6.5, -2.4);   // Assam / Arunachal
+    indiaShape.lineTo(5.8, -0.6);   // Bengal / East
+    indiaShape.lineTo(3.2, 0.2);    // Odisha Coast
+    indiaShape.lineTo(1.2, 3.8);    // Andhra / Tamil Nadu
+    indiaShape.lineTo(0.0, 5.8);    // Kanyakumari (South)
+    indiaShape.lineTo(-1.6, 3.6);   // Kerala / Karnataka
+    indiaShape.lineTo(-3.2, 1.2);   // Maharashtra Coast
+    indiaShape.lineTo(-4.4, -0.8);  // Gujarat Peninsulas
+    indiaShape.lineTo(-3.4, -2.2);  // Rajasthan Border
+    indiaShape.lineTo(-1.8, -4.2);  // Punjab Border
+    indiaShape.closePath();
+
+    const extrudeSettings = {
+      depth: 0.3,
+      bevelEnabled: true,
+      bevelSegments: 3,
+      steps: 1,
+      bevelSize: 0.1,
+      bevelThickness: 0.1
+    };
+
+    const landGeometry = new THREE.ExtrudeGeometry(indiaShape, extrudeSettings);
+    // Rotate geometry to lay flat on the X-Z plane
+    landGeometry.rotateX(Math.PI / 2);
+
+    const landMaterial = new THREE.MeshStandardMaterial({
+      color: 0x0f172a,
+      roughness: 0.7,
+      metalness: 0.3,
+      wireframe: false
+    });
+
+    const indiaMesh = new THREE.Mesh(landGeometry, landMaterial);
+    scene.add(indiaMesh);
+
+    // Land Outline Glow
+    const wireframeMat = new THREE.MeshBasicMaterial({
+      color: 0x0284c7,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.25
+    });
+    const indiaWireMesh = new THREE.Mesh(landGeometry, wireframeMat);
+    scene.add(indiaWireMesh);
+
+    // --- Network Backbone Lines ---
+    const backbonePoints = [
+      [0.5, 0.2, -3.5],   // Delhi
+      [-2.8, 0.2, 0.8],   // Mumbai
+      [-0.6, 0.2, 3.4],   // Bengaluru
+      [0.6, 0.2, 3.5],    // Chennai
+      [-0.2, 0.2, 1.6],   // Hyderabad
+      [0.5, 0.2, -3.5],   // Loop to Delhi
+      [4.0, 0.2, -0.8],   // Kolkata
+      [0.6, 0.2, 3.5]     // Chennai
+    ];
+
+    const linePoints = backbonePoints.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(linePoints);
+    const lineMat = new THREE.LineBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.4,
+      linewidth: 2
+    });
+    const backboneLine = new THREE.Line(lineGeo, lineMat);
+    scene.add(backboneLine);
+
+    // --- Subsea Export Cables (Arcs into the ocean) ---
+    const cableCurves = [
+      // Mumbai to West (Europe / Middle East)
+      new THREE.QuadraticBezierCurve3(
+        new THREE.Vector3(-2.8, 0.2, 0.8),
+        new THREE.Vector3(-6.0, 1.5, 2.0),
+        new THREE.Vector3(-9.0, 0.0, 3.0)
+      ),
+      // Chennai to East (ASEAN / Pacific)
+      new THREE.QuadraticBezierCurve3(
+        new THREE.Vector3(0.6, 0.2, 3.5),
+        new THREE.Vector3(4.5, 1.5, 5.0),
+        new THREE.Vector3(8.5, 0.0, 6.0)
+      )
+    ];
+
+    cableCurves.forEach(curve => {
+      const cGeo = new THREE.TubeGeometry(curve, 32, 0.04, 8, false);
+      const cMat = new THREE.MeshBasicMaterial({ color: 0xec4899, transparent: true, opacity: 0.7 });
+      const cableMesh = new THREE.Mesh(cGeo, cMat);
+      scene.add(cableMesh);
+    });
+
+    // --- Interactive 3D Beacon Nodes ---
+    const nodeMeshes = [];
+    const beaconGroup = new THREE.Group();
+    scene.add(beaconGroup);
+
+    infraNodes.forEach(data => {
+      const marker = new THREE.Group();
+      marker.position.set(data.x, data.y, data.z);
+
+      // Core Pillar
+      const cylGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.8, 16);
+      const cylMat = new THREE.MeshStandardMaterial({
+        color: data.color,
+        emissive: data.color,
+        emissiveIntensity: 0.6,
+        roughness: 0.2
+      });
+      const cylinder = new THREE.Mesh(cylGeo, cylMat);
+      cylinder.position.y = 0.4;
+      marker.add(cylinder);
+
+      // Pulsing Base Ring
+      const ringGeo = new THREE.RingGeometry(0.2, 0.35, 24);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: data.color,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.8
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = 0.02;
+      marker.add(ring);
+
+      marker.userData = { ...data, ringRef: ring };
+      beaconGroup.add(marker);
+      nodeMeshes.push(cylinder); // Target for Raycaster
+    });
+
+    // --- Interaction / Raycasting ---
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    const inspector = document.getElementById('inspector');
+    const titleEl = document.getElementById('node-title');
+    const typeEl = document.getElementById('node-type');
+    const powerEl = document.getElementById('metric-power');
+    const gpuEl = document.getElementById('metric-gpu');
+    const sourceEl = document.getElementById('metric-source');
+    const exportEl = document.getElementById('metric-export');
+
+    function updateInspector(data) {
+      titleEl.innerText = data.name;
+      typeEl.innerText = data.typeLabel;
+      powerEl.innerText = data.power;
+      gpuEl.innerText = data.gpu;
+      sourceEl.innerText = data.source;
+      exportEl.innerText = data.export;
+    }
+
+    window.addEventListener('click', (event) => {
+      // Ignore clicks on HUD buttons/panels
+      if (event.target.closest('.interactive')) return;
+
+      mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(nodeMeshes);
+
+      if (intersects.length > 0) {
+        const selectedParent = intersects[0].object.parent;
+        const nodeData = selectedParent.userData;
+        updateInspector(nodeData);
+
+        // Highlight jump effect
+        selectedParent.position.y = 0.6;
+        setTimeout(() => { selectedParent.position.y = nodeData.y; }, 200);
+      }
+    });
+
+    // --- Layer Filtering Logic ---
+    const filterButtons = document.querySelectorAll('.filter-btn');
+    filterButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        filterButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        const filter = btn.dataset.filter;
+        beaconGroup.children.forEach(marker => {
+          if (filter === 'all' || marker.userData.type === filter) {
+            marker.visible = true;
+          } else {
+            marker.visible = false;
+          }
+        });
+      });
+    });
+
+    // --- Responsive Resizing ---
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // --- Animation Loop ---
+    let clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const elapsedTime = clock.getElapsedTime();
+
+      // Animate pulsing rings
+      beaconGroup.children.forEach((marker, idx) => {
+        if (marker.userData.ringRef) {
+          const scale = 1 + Math.sin(elapsedTime * 3 + idx) * 0.25;
+          marker.userData.ringRef.scale.set(scale, scale, 1);
+        }
+      });
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+  </script>
+</body>
+</html>

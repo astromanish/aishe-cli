@@ -72,18 +72,26 @@ def stream(req: StreamRequest):
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="message must not be empty")
     def _gen():
+        import time
         last_answer = ""
+        started = time.time()
+        tool_n = 0
+        current_tool = None
+        yield json.dumps({"event": "start", "model": os.environ.get("AISHE_MODEL", "local"), "ts": started}, default=str) + "\n"
         try:
             for event in agent.stream({"messages": [{"role": "user", "content": req.message}]}, config=_config(req.thread_id), stream_mode="messages"):
                 runnable, raw = event
                 chunk = runnable
                 if hasattr(chunk, "tool_calls") and chunk.tool_calls:
                     for tc in chunk.tool_calls:
-                        yield json.dumps({"event": "tool_call", "id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args")}, default=str) + "\n"
+                        tool_n += 1
+                        current_tool = tc.get("name")
+                        yield json.dumps({"event": "stage", "name": "tooling"}, default=str) + "\n"
+                        yield json.dumps({"event": "tool_call", "id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args"), "n": tool_n}, default=str) + "\n"
                     continue
                 if hasattr(chunk, "type") and chunk.type == "tool":
                     content = getattr(chunk, "content", "")
-                    yield json.dumps({"event": "tool_result", "result": str(content)[:500]}, default=str) + "\n"
+                    yield json.dumps({"event": "tool_result", "name": current_tool, "result": str(content)[:500]}, default=str) + "\n"
                     continue
                 if hasattr(chunk, "type") and chunk.type in ("AIMessageChunk", "ai"):
                     content = getattr(chunk, "content", None)
@@ -98,13 +106,10 @@ def stream(req: StreamRequest):
                                     last_answer += text
                                     yield json.dumps({"event": "token", "content": text}) + "\n"
         except Exception as e:
-            # A provider/agent error mid-stream must not kill the connection —
-            # emit it as an NDJSON event so the client can show it cleanly.
             print(f"[stream error] {type(e).__name__}: {e}", flush=True)
             yield json.dumps({"event": "error", "message": f"{type(e).__name__}: {e}"}) + "\n"
-        # Always end the stream with a terminal event — a missing final is what
-        # makes clients see "Response ended prematurely".
-        yield json.dumps({"event": "final", "answer": last_answer}) + "\n"
+        yield json.dumps({"event": "stage", "stage": "end"}, default=str) + "\n"
+        yield json.dumps({"event": "final", "answer": last_answer, "duration_s": round(time.time() - started, 3), "tool_calls": tool_n}, default=str) + "\n"
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
 # ─── Memory endpoints (proxied to mem0_memory) ─────────────────────────────

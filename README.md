@@ -13,7 +13,8 @@ curl -fsSL https://raw.githubusercontent.com/astromanish/aishe-cli/main/setup.sh
 ```bash
 aishe                    # interactive streaming chat
 aishe "What is 15 * 4?"  # one-shot streaming chat
-aishe live               # live voice conversation
+aishe live               # live voice — native Electron lite app (pixel pet: push-to-talk + always-listening live voice)
+aishe live --cli         # terminal voice REPL (press Enter to record) instead of the Electron app
 aishe status             # service health
 aishe memory add "fact"  # save a fact
 aishe memory search "x"  # search memory

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────
 #  Aishe CLI — One-Command Setup
-#  "Voice-first AI assistant for your terminal"
+#  "privacy-first AI assistant for your terminal"
 #
 #  Streamlined install: Python deps + DeepAgent sidecar + CLI.
 #  Ollama and voice (STT/TTS) are NOT installed here — install
@@ -32,7 +32,7 @@ fail() { echo -e "  ${RED}✗${NC} $1"; }
 echo ""
 echo -e "  ${BOLD}╭──────────────────────────────────────╮${NC}"
 echo -e "  ${BOLD}│${NC}        ${CYAN}✨ Aishe CLI Setup ✨${NC}        ${BOLD}│${NC}"
-echo -e "  ${BOLD}│${NC}  ${DIM}Voice-first AI for your terminal${NC}   ${BOLD}│${NC}"
+echo -e "  ${BOLD}│${NC}  ${DIM}privacy-first AI for your terminal${NC}   ${BOLD}│${NC}"
 echo -e "  ${BOLD}╰──────────────────────────────────────╯${NC}"
 echo ""
 
@@ -517,7 +517,7 @@ from deepagents.backends.filesystem import FilesystemBackend
 from langchain_openai import ChatOpenAI
 from tools import calculator, get_current_time, word_stats, memory_search, memory_add
 
-MODEL_NAME = os.environ.get("AISHE_MODEL", "deepseek-v4-flash:cloud")
+MODEL_NAME = os.environ.get("AISHE_MODEL", "deepseek-v4-flash")
 BASE_URL = os.environ.get("AISHE_OLLAMA_URL", "http://localhost:11434/v1")
 API_KEY = os.environ.get("AISHE_API_KEY", "ollama")
 
@@ -642,31 +642,44 @@ def stream(req: StreamRequest):
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="message must not be empty")
     def _gen():
+        import time
         last_answer = ""
-        for event in agent.stream({"messages": [{"role": "user", "content": req.message}]}, config=_config(req.thread_id), stream_mode="messages"):
-            runnable, raw = event
-            chunk = runnable
-            if hasattr(chunk, "tool_calls") and chunk.tool_calls:
-                for tc in chunk.tool_calls:
-                    yield json.dumps({"event": "tool_call", "id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args")}, default=str) + "\n"
-                continue
-            if hasattr(chunk, "type") and chunk.type == "tool":
-                content = getattr(chunk, "content", "")
-                yield json.dumps({"event": "tool_result", "result": str(content)[:500]}, default=str) + "\n"
-                continue
-            if hasattr(chunk, "type") and chunk.type in ("AIMessageChunk", "ai"):
-                content = getattr(chunk, "content", None)
-                if isinstance(content, str) and content:
-                    last_answer += content
-                    yield json.dumps({"event": "token", "content": content}) + "\n"
-                elif isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text = block.get("text", "")
-                            if text:
-                                last_answer += text
-                                yield json.dumps({"event": "token", "content": text}) + "\n"
-        yield json.dumps({"event": "final", "answer": last_answer}) + "\n"
+        started = time.time()
+        tool_n = 0
+        current_tool = None
+        yield json.dumps({"event": "start", "model": os.environ.get("AISHE_MODEL", "local"), "ts": started}, default=str) + "\n"
+        try:
+            for event in agent.stream({"messages": [{"role": "user", "content": req.message}]}, config=_config(req.thread_id), stream_mode="messages"):
+                runnable, raw = event
+                chunk = runnable
+                if hasattr(chunk, "tool_calls") and chunk.tool_calls:
+                    for tc in chunk.tool_calls:
+                        tool_n += 1
+                        current_tool = tc.get("name")
+                        yield json.dumps({"event": "stage", "name": "tooling"}, default=str) + "\n"
+                        yield json.dumps({"event": "tool_call", "id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args"), "n": tool_n}, default=str) + "\n"
+                    continue
+                if hasattr(chunk, "type") and chunk.type == "tool":
+                    content = getattr(chunk, "content", "")
+                    yield json.dumps({"event": "tool_result", "name": current_tool, "result": str(content)[:500]}, default=str) + "\n"
+                    continue
+                if hasattr(chunk, "type") and chunk.type in ("AIMessageChunk", "ai"):
+                    content = getattr(chunk, "content", None)
+                    if isinstance(content, str) and content:
+                        last_answer += content
+                        yield json.dumps({"event": "token", "content": content}) + "\n"
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "")
+                                if text:
+                                    last_answer += text
+                                    yield json.dumps({"event": "token", "content": text}) + "\n"
+        except Exception as e:
+            print(f"[stream error] {type(e).__name__}: {e}", flush=True)
+            yield json.dumps({"event": "error", "message": f"{type(e).__name__}: {e}"}) + "\n"
+        yield json.dumps({"event": "stage", "stage": "end"}, default=str) + "\n"
+        yield json.dumps({"event": "final", "answer": last_answer, "duration_s": round(time.time() - started, 3), "tool_calls": tool_n}, default=str) + "\n"
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
 if __name__ == "__main__":
@@ -803,6 +816,10 @@ voice:
   vad_threshold: 0.5
   vad_min_speech_duration_ms: 250
   vad_min_silence_duration_ms: 500
+live:
+  silence_ms: 500
+  min_speech_ms: 250
+  rms_threshold: 0.018
 data:
   dir: "${DEFAULT_DATA_DIR}"
 ui:
@@ -818,6 +835,23 @@ echo -e "\n  ${BOLD}9. Data Directories${NC}"
 mkdir -p "${DEFAULT_DATA_DIR}/memory" "${DEFAULT_DATA_DIR}/threads"
 pass "Created data directories at ${DEFAULT_DATA_DIR}"
 
+# ── 9. Aishe Live (Electron lite app) ─────────────────────
+echo -e "\n  ${BOLD}10. Aishe Live app (native pixel-pet live mode)${NC}"
+if command -v npm &>/dev/null; then
+    if [ -d "${SCRIPT_SRC}/electron-live/node_modules/electron" ]; then
+        pass "Aishe Live app already installed"
+    else
+        info "Installing Electron app dependencies (one-time)..."
+        if (cd "${SCRIPT_SRC}/electron-live" && npm install --no-fund --no-audit --silent); then
+            pass "Aishe Live app ready — run: aishe live"
+        else
+            warn "npm install failed — run: cd electron-live && npm install"
+        fi
+    fi
+else
+    warn "npm not found — Aishe Live app needs: cd electron-live && npm install"
+fi
+
 # ── Done ───────────────────────────────────────────────────
 echo ""
 echo -e "  ${BOLD}╭──────────────────────────────────────╮${NC}"
@@ -832,7 +866,7 @@ echo -e "  ${CYAN}Next steps:${NC}"
 echo -e "  1. Run: ${CYAN}aishe status${NC}"
 echo ""
 echo -e "  2. Start chatting: ${CYAN}aishe${NC}"
-echo -e "     Or go live:      ${CYAN}aishe live${NC}"
+echo -e "     Or go live:      ${CYAN}aishe live${NC}   (native pixel-pet app)"
 echo ""
 echo -e "  ${DIM}Note: Ollama + voice (STT/TTS) are installed separately.${NC}"
 echo -e "  ${DIM}Ensure Ollama is running (ollama serve) with a model pulled.${NC}"

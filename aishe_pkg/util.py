@@ -115,7 +115,7 @@ def welcome() -> None:
     print()
     print(f"  {bold('╭──────────────────────────────────────────╮')}")
     print(f"  {bold('│')}        {cyan(bold('✨ Aishe CLI ✨'))}            {bold('│')}")
-    print(f"  {bold('│')}  {dim('Voice-first AI for your terminal')}    {bold('│')}")
+    print(f"  {bold('│')}  {dim('privacy-first AI for your terminal')}    {bold('│')}")
     print(f"  {bold('╰──────────────────────────────────────────╯')}")
     print()
     print(f"  {dim('Try: aishe status · aishe · aishe live')}")
