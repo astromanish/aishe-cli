@@ -31,15 +31,17 @@ QDRANT_URL = os.environ.get("AISHE_QDRANT_URL", "http://localhost:6333")
 COLLECTION = os.environ.get("AISHE_MEMORY_COLLECTION", "aishe_memories")
 EMBED_MODEL = os.environ.get("AISHE_EMBED_MODEL", "qwen3-embedding:0.6b")
 EMBED_DIMS = int(os.environ.get("AISHE_EMBED_DIMS", "1024"))
-LLM_MODEL = os.environ.get("AISHE_MODEL", "deepseek-v4-flash:cloud")
+LLM_MODEL = os.environ.get("AISHE_EXTRACT_MODEL", os.environ.get("AISHE_MODEL", "qwen3:1.7b"))
 # The embedder MUST stay on the local Ollama server (qwen3-embedding) even when
 # the chat LLM is a cloud provider. AISHE_EMBED_URL is set by `aishe setup`;
 # default to the classic local Ollama base.
 EMBED_BASE = os.environ.get("AISHE_EMBED_URL", "http://localhost:11434").rstrip("/")
 if EMBED_BASE.endswith("/v1"):
     EMBED_BASE = EMBED_BASE[:-3]
-# The LLM (fact extraction) follows the configured provider, same as agent.py:
-# AISHE_BASE_URL for cloud providers, or the local Ollama URL.
+# The LLM (fact extraction) runs against local Ollama by default; a cloud
+# provider is used only when explicitly configured via AISHE_BASE_URL +
+# AISHE_API_KEY. Extraction defaulting to a cloud model name sent to the local
+# server previously caused a silent auth/model failure — keep extraction local.
 LLM_RAW = os.environ.get("AISHE_BASE_URL") or os.environ.get("AISHE_OLLAMA_URL", "http://localhost:11434/v1")
 LLM_BASE = LLM_RAW.rstrip("/")
 if not LLM_BASE.endswith("/v1"):

@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# aishe-voice — select the voice backend behind the canonical STT/TTS ports.
+#
+#   aishe-voice local    run local Whisper (:5093) + Kokoro (:8766)
+#   aishe-voice sarvam   run Sarvam cloud adapters on the SAME ports
+#   aishe-voice status   show which backend is answering each port
+#   aishe-voice stop     stop both ports
+#
+# Why a port swap instead of a config flag: the Electron live app
+# (electron-live/lib/services.js) hardcodes http://localhost:5093 and :8766, and
+# aishe_pkg/voice.py reads them from config. Swapping what listens on those
+# ports keeps BOTH consumers working with no code change.
+set -uo pipefail
+
+SIDECARS="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+VENV="$SIDECARS/.venv/bin/python"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/aishe/voice"
+mkdir -p "$STATE_DIR"
+
+STT_PORT=5093
+TTS_PORT=8766
+
+GREEN=$'\033[32m'; RED=$'\033[31m'; YEL=$'\033[33m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+ok()   { echo "  ${GREEN}●${RESET} $*"; }
+warn() { echo "  ${YEL}!${RESET} $*"; }
+bad()  { echo "  ${RED}○${RESET} $*"; }
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+# PID(s) listening on a TCP port. Never matches by process name — `pkill -f`
+# would also match the caller's own command line.
+port_pids() {
+  ss -tlnpH "sport = :$1" 2>/dev/null \
+    | grep -oP 'pid=\K[0-9]+' | sort -u
+}
+
+kill_port() {
+  local port="$1" pids
+  pids=$(port_pids "$port")
+  [ -z "$pids" ] && return 0
+  for p in $pids; do kill -TERM "$p" 2>/dev/null; done
+  for _ in $(seq 1 15); do
+    sleep 0.4
+    [ -z "$(port_pids "$port")" ] && return 0
+  done
+  for p in $(port_pids "$port"); do kill -9 "$p" 2>/dev/null; done
+  sleep 1
+}
+
+wait_health() { # wait_health URL TIMEOUT_S
+  local url="$1" t="${2:-30}" i
+  for i in $(seq 1 $((t * 2))); do
+    curl -s --max-time 2 "$url" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+start_server() { # start_server SCRIPT PORT LOGNAME [ENV VAL]...
+  local script="$1" port="$2" logname="$3"; shift 3
+  local log="$STATE_DIR/${logname}.log"
+  # Strip provider vars inherited from the caller's shell. A stale AISHE_API_KEY
+  # (e.g. an OpenRouter key from aishe/deepagent.env) would otherwise be picked up
+  # by the Sarvam adapters and rejected upstream as a 403.
+  ( cd "$SIDECARS" && env -u AISHE_API_KEY -u AISHE_BASE_URL -u AISHE_MODEL -u AISHE_PORT \
+      "$@" setsid nohup "$VENV" "$script" >"$log" 2>&1 & echo $! >"$STATE_DIR/${logname}.pid" )
+  sleep 0.5
+}
+
+stop_all() {
+  kill_port "$STT_PORT"
+  kill_port "$TTS_PORT"
+  rm -f "$STATE_DIR"/*.pid
+}
+
+# ── actions ────────────────────────────────────────────────────────────────
+
+start_local() {
+  stop_all
+  echo "  Starting LOCAL voice backend (Whisper + Kokoro)…"
+  start_server stt_server.py "$STT_PORT" local-stt
+  start_server tts_server.py "$TTS_PORT" local-tts
+  wait_health "http://localhost:$STT_PORT/healthz" 60 && ok "STT local  :$STT_PORT  (whisper)" \
+    || bad "STT local  :$STT_PORT did not come up — see $STATE_DIR/local-stt.log"
+  wait_health "http://localhost:$TTS_PORT/health" 60 && ok "TTS local  :$TTS_PORT  (kokoro)" \
+    || bad "TTS local  :$TTS_PORT did not come up — see $STATE_DIR/local-tts.log"
+}
+
+start_sarvam() {
+  stop_all
+  echo "  Starting SARVAM CLOUD voice backend…"
+  start_server sarvam_stt_server.py "$STT_PORT" sarvam-stt AISHE_STT_PORT="$STT_PORT"
+  start_server sarvam_tts_server.py "$TTS_PORT" sarvam-tts AISHE_TTS_PORT="$TTS_PORT"
+  wait_health "http://localhost:$STT_PORT/healthz" 30 && ok "STT sarvam :$STT_PORT  (saarika)" \
+    || bad "STT sarvam :$STT_PORT did not come up — see $STATE_DIR/sarvam-stt.log"
+  wait_health "http://localhost:$TTS_PORT/health" 30 && ok "TTS sarvam :$TTS_PORT  (bulbul)" \
+    || bad "TTS sarvam :$TTS_PORT did not come up — see $STATE_DIR/sarvam-tts.log"
+}
+
+show_status() {
+  echo "  ${DIM}port   service${RESET}"
+  local s t
+  s=$(curl -s --max-time 3 "http://localhost:$STT_PORT/" 2>/dev/null)
+  t=$(curl -s --max-time 3 "http://localhost:$TTS_PORT/" 2>/dev/null)
+  if [ -n "$s" ]; then ok ":$STT_PORT  $(echo "$s" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("service","?"), "| backend:", d.get("backend","local"))' 2>/dev/null)"
+  else bad ":$STT_PORT  down"; fi
+  if [ -n "$t" ]; then ok ":$TTS_PORT  $(echo "$t" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("service","?"), "| backend:", d.get("backend","local"))' 2>/dev/null)"
+  else bad ":$TTS_PORT  down"; fi
+}
+
+case "${1:-status}" in
+  local)  start_local ;;
+  sarvam) start_sarvam ;;
+  stop)   stop_all; ok "voice backends stopped" ;;
+  status) show_status ;;
+  restart) "$0" stop; "$0" "${2:-local}" ;;
+  *)
+    echo "Usage: aishe-voice {local|sarvam|status|stop|restart <local|sarvam>}"
+    exit 1
+    ;;
+esac

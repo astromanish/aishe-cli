@@ -27,6 +27,12 @@ from pathlib import Path
 
 import requests
 
+# The sidecar runs standalone, so it cannot import aishe_pkg directly. Mirror
+# the single-thread rule here from config (kept intentionally tiny): in single
+# mode every surface shares one thread id so Aishe carries context across
+# CLI / Telegram / desktop.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # ─── Config ────────────────────────────────────────────────────────────────
 
 CONFIG_FILE = Path(os.environ.get("AISHE_CONFIG", "~/.config/aishe/config.yaml")).expanduser()
@@ -119,6 +125,63 @@ def _log(log_file: str | None, line: str) -> None:
         pass
 
 
+# ─── Tool-call narration ───────────────────────────────────────────────────
+# Turn a raw tool_call event into a human one-liner for Telegram: what Aishe is
+# doing, and the key argument (query / command / url / fact) so the user can
+# follow along instead of seeing a bare tool name.
+
+_TOOL_META = {
+    "web_search":     ("🔍", "Searching the web"),
+    "web_extract":    ("📄", "Reading a page"),
+    "memory_search":  ("🧠", "Searching my memory"),
+    "memory_add":     ("💾", "Saving to memory"),
+    "run_command":    ("⚙️", "Running a command"),
+    "calculator":     ("🧮", "Calculating"),
+    "get_current_time": ("🕐", "Checking the time"),
+    "word_stats":     ("📊", "Analyzing text"),
+}
+
+# Which argument carries the interesting payload for each tool, and the
+# connector phrase that reads naturally with its verb.
+_TOOL_ARG = {
+    "web_search":     ("query", "for"),
+    "web_extract":    ("url", "→"),
+    "memory_search":  ("query", "for"),
+    "memory_add":     ("fact", "→"),
+    "run_command":    ("command", "→"),
+    "calculator":     ("expression", "→"),
+    "get_current_time": ("timezone", "→"),
+    "word_stats":     ("text", "→"),
+}
+
+# Keep the narrated value short so the bubble stays one line.
+_MAX_ARG = 70
+
+
+def _clip(s: str, n: int = _MAX_ARG) -> str:
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def describe_tool(name: str | None, args: dict | None) -> str:
+    """Human-readable one-liner for a tool call, e.g.
+    '🔍 Searching the web for "sarvam bulbul v3 voices"'."""
+    if not name:
+        return "🔧 Working…"
+    icon, verb = _TOOL_META.get(name, ("🔧", "Using"))
+    a = args if isinstance(args, dict) else {}
+
+    arg_key, conn = _TOOL_ARG.get(name, (None, ""))
+    if arg_key and a.get(arg_key):
+        return f"{icon} {verb} {conn} \"{_clip(a[arg_key])}\""
+
+    # No recognized arg: show whatever the model passed, generically.
+    if a:
+        k, v = next(iter(a.items()))
+        return f"{icon} {verb} ({_clip(v)})"
+    return f"{icon} {verb}…"
+
+
 # ─── Markdown → Telegram HTML ──────────────────────────────────────────────
 
 def _esc(s: str) -> str:
@@ -188,6 +251,7 @@ def _stream_answer(token: str, chat_id, message: str, deepagent_url: str, tid: s
     answer_buf = ""
     final_answer = ""
     tool_count = 0
+    tool_names: list[str] = []
 
     try:
         for raw in r.iter_lines(decode_unicode=True):
@@ -202,13 +266,19 @@ def _stream_answer(token: str, chat_id, message: str, deepagent_url: str, tid: s
 
             if etype == "tool_call":
                 tool_count += 1
-                name = ev.get("name", "?")
-                _log(log_file, f"[tool] {name} args={ev.get('args', {})}")
-                # one compact line per tool call — name only, no args spam
-                _send(token, chat_id, f"🔧 <code>{html.escape(name)}</code>", parse="HTML")
+                name = ev.get("name")
+                args = ev.get("args", {})
+                if name and name not in tool_names:
+                    tool_names.append(name)
+                    _log(log_file, f"[tool] {name} args={args}")
+                    line = describe_tool(name, args)
+                    _send(token, chat_id, line, parse="HTML")
+                elif name:
+                    _log(log_file, f"[tool] {name} args={args} (dup — no bubble)")
 
             elif etype == "tool_result":
                 _log(log_file, f"[result] {str(ev.get('result', ''))[:300]}")
+                # silent — do not post tool results to chat yet
 
             elif etype == "token":
                 answer_buf += ev.get("content", "")
@@ -289,6 +359,17 @@ def _stop(*_):
     RUNNING = False
 
 
+def _resolve_thread(chat_id, cfg: dict) -> str:
+    """Thread id for this Telegram message.
+
+    Always the shared id: CLI, Telegram and desktop all read and write the same
+    continuous conversation. `chat_id` is unused but kept in the signature so
+    callers do not change.
+    """
+    threads = (cfg.get("threads") or {}) if isinstance(cfg, dict) else {}
+    return str(threads.get("id", "main") or "main")
+
+
 def main() -> None:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
@@ -343,8 +424,8 @@ def main() -> None:
                 print(f"[aishe-tg] Denied user {user_id} ({user.get('username', '?')})", flush=True)
                 continue
 
-            tid = f"telegram:{chat_id}"
-            print(f"[aishe-tg] {user_id}: {text!r}", flush=True)
+            tid = _resolve_thread(chat_id, cfg)
+            print(f"[aishe-tg] {user_id}: {text!r} (thread {tid})", flush=True)
             _log(log_file, f"[user {user_id}] {text}")
             _stream_answer(token, chat_id, text, deepagent_url, tid, log_file)
 

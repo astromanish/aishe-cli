@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json, os
 from typing import Any
+from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -15,10 +16,52 @@ from mem0_memory import (
     list_all as mem_list,
     status as mem_status,
 )
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from aishe_pkg.threads import get as threads_get
 
 HOST = os.environ.get("AISHE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AISHE_PORT", "8765"))
 
+# ─── Short-term memory files (re-read per request so edits take effect live) ──
+def _read_short_term_memory() -> tuple[str, str]:
+    """Return (soul_text, user_text). Empty strings if files don't exist."""
+    data_dir = Path(os.environ.get("AISHE_DATA_DIR", str(Path.home() / "aishe")))
+    memory_dir = data_dir / "memory"
+    soul_file = memory_dir / "soul.md"
+    user_file = memory_dir / "user.md"
+    soul = soul_file.read_text() if soul_file.exists() else ""
+    user = user_file.read_text() if user_file.exists() else ""
+    return soul, user
+
+
+def _build_system_prompt(base_prompt: str) -> str:
+    """Combine the base system prompt with soul.md and user.md content.
+
+    Re-read from disk on every call so edits to those files apply without a
+    server restart.
+    """
+    soul, user = _read_short_term_memory()
+    parts = [base_prompt]
+    if soul.strip():
+        parts.append("\n\n## Assistant Identity (soul.md)\n\n" + soul.strip())
+    if user.strip():
+        parts.append("\n\n## User Context (user.md)\n\n" + user.strip())
+    return "\n".join(parts)
+
+def _load_thread_history(thread_id: str, max_messages: int = 20) -> list[dict[str, str]]:
+    """Load prior messages from SQLite for the given thread_id.
+    Returns list of {'role': ..., 'content': ...} dicts, most recent last,
+    truncated to max_messages."""
+    t = threads_get(thread_id)
+    if not t or not t.get("messages"):
+        return []
+    msgs = t["messages"]
+    if len(msgs) > max_messages:
+        msgs = msgs[-max_messages:]
+    return [{"role": m["role"], "content": m["content"]} for m in msgs]
+
+# ─── Request/Response models ─────────────────────────────────────────────────
 class InvokeRequest(BaseModel):
     message: str = Field(..., description="The user's request")
     thread_id: str = Field(default="default", description="Conversation thread id")
@@ -31,6 +74,7 @@ class InvokeResponse(BaseModel):
 
 class StreamRequest(InvokeRequest): pass
 
+# ─── App setup ───────────────────────────────────────────────────────────────
 app = FastAPI(title="Aishe DeepAgent", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
@@ -47,9 +91,22 @@ def list_tools():
     try: nodes = agent.get_graph().nodes; return {"nodes": sorted(nodes.keys())}
     except: return {"nodes": []}
 
+# ─── Agent input builder ─────────────────────────────────────────────────────
 def _config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
+def _build_agent_input(message: str, thread_id: str) -> list[dict[str, str]]:
+    """Build the full messages list for the agent:
+    [system prompt (base + soul.md + user.md), thread_history..., current user msg]"""
+    from agent import SYSTEM_PROMPT
+    history = _load_thread_history(thread_id)
+    messages: list[dict[str, str]] = [{"role": "system", "content": _build_system_prompt(SYSTEM_PROMPT)}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": message})
+    return messages
+
+# ─── Tool call summarizer ────────────────────────────────────────────────────
 def _summarize_tool_calls(messages) -> list[dict[str, Any]]:
     calls = []
     for msg in messages:
@@ -58,14 +115,16 @@ def _summarize_tool_calls(messages) -> list[dict[str, Any]]:
                 calls.append({"name": tc.get("name"), "args": tc.get("args"), "id": tc.get("id")})
     return calls
 
+# ─── Endpoints ───────────────────────────────────────────────────────────────
 @app.post("/invoke", response_model=InvokeResponse)
 def invoke(req: InvokeRequest):
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="message must not be empty")
-    state = agent.invoke({"messages": [{"role": "user", "content": req.message}]}, config=_config(req.thread_id))
+    messages = _build_agent_input(req.message, req.thread_id)
+    state = agent.invoke({"messages": messages}, config=_config(req.thread_id))
     answer = extract_final_answer(state)
-    messages = state.get("messages", [])
-    return InvokeResponse(thread_id=req.thread_id, answer=answer, steps=len(messages), tool_calls=_summarize_tool_calls(messages))
+    messages_out = state.get("messages", [])
+    return InvokeResponse(thread_id=req.thread_id, answer=answer, steps=len(messages_out), tool_calls=_summarize_tool_calls(messages_out))
 
 @app.post("/stream")
 def stream(req: StreamRequest):
@@ -79,7 +138,8 @@ def stream(req: StreamRequest):
         current_tool = None
         yield json.dumps({"event": "start", "model": os.environ.get("AISHE_MODEL", "local"), "ts": started}, default=str) + "\n"
         try:
-            for event in agent.stream({"messages": [{"role": "user", "content": req.message}]}, config=_config(req.thread_id), stream_mode="messages"):
+            messages = _build_agent_input(req.message, req.thread_id)
+            for event in agent.stream({"messages": messages}, config=_config(req.thread_id), stream_mode="messages"):
                 runnable, raw = event
                 chunk = runnable
                 if hasattr(chunk, "tool_calls") and chunk.tool_calls:
@@ -113,7 +173,6 @@ def stream(req: StreamRequest):
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
 # ─── Memory endpoints (proxied to mem0_memory) ─────────────────────────────
-
 class MemoryAddRequest(BaseModel):
     fact: str
 

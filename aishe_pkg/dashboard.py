@@ -255,6 +255,20 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
     padding: 12px; border-radius: 8px; font-family: var(--mono); font-size: 12px; resize: vertical; }
   .raw:focus { outline: none; border-color: var(--amber); }
 
+  .price { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13px; }
+  .price th, .price td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+  .price thead th { color: var(--muted); font-weight: 600; background: var(--panel2); position: sticky; top: 0; }
+  .price td.num { text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .price tbody tr:hover { background: color-mix(in srgb, var(--panel) 90%, var(--border)); }
+  .price td:first-child { font-weight: 600; }
+  .price tbody.grp-head th { background: var(--amber); color: #111; font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  .price tbody.grp-tier tr { background: var(--panel2); }
+  .price tbody.grp-tier td { color: var(--muted); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .badge-tier { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; line-height: 1.6; }
+  .badge-tier.high { background: #7f1d1d; color: #fecaca; }
+  .badge-tier.mid  { background: #78350f; color: #fde68a; }
+  .badge-tier.low  { background: #14532d; color: #bbf7d0; }
+
   .footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--dim); font-size: 12px; font-family: var(--mono); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 
   @media (max-width: 640px) {
@@ -292,6 +306,18 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="section">
     <div class="section-title">Telegram</div>
     <div class="card" id="card-telegram"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Pricing</div>
+    <div class="card">
+      <div class="card-head"><span class="k">model pricing catalog</span><span class="hint">USD + ₹ INR, indicative</span></div>
+      <div class="card-body">
+        <p class="muted" style="margin-bottom:10px" id="price-fx"></p>
+        <table class="price" id="price-table"></table>
+        <p class="muted" style="margin-top:12px" id="price-note"></p>
+      </div>
+    </div>
   </div>
 
   <div class="section">
@@ -446,6 +472,210 @@ async function load() {
   document.getElementById('cfgpath').textContent = '~/.config/aishe/config.yaml';
   render();
   loadStatus();
+  loadPricing();
+}
+
+/* ── Pricing catalog (read-only) ────────────────────────────────── */
+const PRICE_FX = 83; // ₹ per USD, indicative
+// Live OpenRouter list prices (USD / 1M tokens), verified 2026-09. Every model
+// supports tools (agentic). Grouped by company; tier = High/Mid/Low by OUTPUT
+// price per 1M tokens. c = cached input read (USD), '-' when not offered.
+const PRICE_CATALOG = [
+  { company: "Anthropic", models: [
+    { m: "Claude Sonnet 5", c: 0.200, inp: 2.000, out: 10.000, tier: "High" },
+    { m: "Claude Sonnet 4.6", c: 0.300, inp: 3.000, out: 15.000, tier: "High" },
+    { m: "Claude Sonnet 4.5", c: 0.300, inp: 3.000, out: 15.000, tier: "High" },
+    { m: "Claude Sonnet 4", c: 0.300, inp: 3.000, out: 15.000, tier: "High" },
+    { m: "Claude Opus 5", c: 0.500, inp: 5.000, out: 25.000, tier: "High" },
+    { m: "Claude Haiku 4.5", c: 0.100, inp: 1.000, out: 5.000, tier: "Mid" },
+    { m: "Claude 3 Haiku", c: 0.030, inp: 0.250, out: 1.250, tier: "Low" },
+  ] },
+  { company: "OpenAI", models: [
+    { m: "o3", c: 0.500, inp: 2.000, out: 8.000, tier: "High" },
+    { m: "GPT-4.1", c: 0.500, inp: 2.000, out: 8.000, tier: "High" },
+    { m: "GPT-5.6 Sol Pro", c: 0.200, inp: 2.000, out: 10.000, tier: "High" },
+    { m: "GPT-5.6 Sol", c: 0.200, inp: 2.000, out: 10.000, tier: "High" },
+    { m: "GPT-5.1-Codex-Max", c: 0.125, inp: 1.250, out: 10.000, tier: "High" },
+    { m: "GPT-5.1", c: 0.125, inp: 1.250, out: 10.000, tier: "High" },
+    { m: "GPT-5.1-Codex", c: 0.130, inp: 1.250, out: 10.000, tier: "High" },
+    { m: "GPT-5", c: 0.125, inp: 1.250, out: 10.000, tier: "High" },
+    { m: "GPT-4o", c: 1.250, inp: 2.500, out: 10.000, tier: "High" },
+    { m: "GPT-5.6 Terra Pro", c: 0.200, inp: 2.000, out: 12.000, tier: "High" },
+    { m: "GPT-5.6 Terra", c: 0.200, inp: 2.000, out: 12.000, tier: "High" },
+    { m: "GPT-5.3-Codex", c: 0.175, inp: 1.750, out: 14.000, tier: "High" },
+    { m: "GPT-5.2-Codex", c: 0.175, inp: 1.750, out: 14.000, tier: "High" },
+    { m: "GPT-5.2 Chat", c: 0.175, inp: 1.750, out: 14.000, tier: "High" },
+    { m: "GPT-5.2", c: 0.175, inp: 1.750, out: 14.000, tier: "High" },
+    { m: "GPT-5.4", c: 0.250, inp: 2.500, out: 15.000, tier: "High" },
+    { m: "GPT Chat Latest", c: 0.500, inp: 5.000, out: 30.000, tier: "High" },
+    { m: "GPT-5.5", c: 0.500, inp: 5.000, out: 30.000, tier: "High" },
+    { m: "GPT-6 Astra", c: 1.000, inp: 10.000, out: 50.000, tier: "High" },
+    { m: "GPT-6 Astra Pro", c: 1.000, inp: 10.000, out: 50.000, tier: "High" },
+    { m: "GPT-4", c: null, inp: 30.000, out: 60.000, tier: "High" },
+    { m: "GPT-5 Pro", c: null, inp: 15.000, out: 120.000, tier: "High" },
+    { m: "GPT-5.2 Pro", c: null, inp: 21.000, out: 168.000, tier: "High" },
+    { m: "GPT-5.5 Pro", c: null, inp: 30.000, out: 180.000, tier: "High" },
+    { m: "GPT-5.4 Pro", c: null, inp: 30.000, out: 180.000, tier: "High" },
+    { m: "o4 Mini High", c: 0.275, inp: 1.100, out: 4.400, tier: "Mid" },
+    { m: "o4 Mini", c: 0.275, inp: 1.100, out: 4.400, tier: "Mid" },
+    { m: "o3 Mini High", c: 0.550, inp: 1.100, out: 4.400, tier: "Mid" },
+    { m: "o3 Mini", c: 0.550, inp: 1.100, out: 4.400, tier: "Mid" },
+    { m: "GPT-5.4 Mini", c: 0.075, inp: 0.750, out: 4.500, tier: "Mid" },
+    { m: "gpt-oss-20b", c: 0.030, inp: 0.030, out: 0.130, tier: "Low" },
+    { m: "gpt-oss-120b", c: null, inp: 0.037, out: 0.170, tier: "Low" },
+    { m: "GPT-5 Nano", c: 0.005, inp: 0.050, out: 0.400, tier: "Low" },
+    { m: "GPT-4.1 Nano", c: 0.025, inp: 0.100, out: 0.400, tier: "Low" },
+    { m: "GPT-4o-mini", c: 0.075, inp: 0.150, out: 0.600, tier: "Low" },
+    { m: "GPT-5.6 Luna Pro", c: 0.020, inp: 0.200, out: 1.200, tier: "Low" },
+    { m: "GPT-5.6 Luna", c: 0.020, inp: 0.200, out: 1.200, tier: "Low" },
+    { m: "GPT-5.4 Nano", c: 0.020, inp: 0.200, out: 1.250, tier: "Low" },
+    { m: "GPT-4.1 Mini", c: 0.100, inp: 0.400, out: 1.600, tier: "Low" },
+    { m: "GPT-5.1-Codex-Mini", c: 0.030, inp: 0.250, out: 2.000, tier: "Low" },
+    { m: "GPT-5 Mini", c: 0.025, inp: 0.250, out: 2.000, tier: "Low" },
+  ] },
+  { company: "Google", models: [
+    { m: "Gemini 3.5 Flash", c: 0.150, inp: 1.500, out: 9.000, tier: "High" },
+    { m: "Gemini 2.5 Pro", c: 0.125, inp: 1.250, out: 10.000, tier: "High" },
+    { m: "Gemini 3.1 Pro Preview Custom Tools", c: 0.200, inp: 2.000, out: 12.000, tier: "High" },
+    { m: "Gemini 2.5 Flash", c: 0.030, inp: 0.300, out: 2.500, tier: "Mid" },
+    { m: "Gemini 3 Flash Preview", c: 0.050, inp: 0.500, out: 3.000, tier: "Mid" },
+    { m: "Gemini 3.8 Flash", c: 0.075, inp: 0.750, out: 3.750, tier: "Mid" },
+    { m: "Gemini 3.7 Flash", c: 0.075, inp: 0.750, out: 3.750, tier: "Mid" },
+    { m: "Gemini 3.6 Flash", c: 0.075, inp: 0.750, out: 3.750, tier: "Mid" },
+    { m: "Gemma 3 12B", c: null, inp: 0.050, out: 0.150, tier: "Low" },
+    { m: "Gemma 4 26B A4B", c: 0.050, inp: 0.090, out: 0.300, tier: "Low" },
+    { m: "Gemma 4 31B", c: 0.050, inp: 0.090, out: 0.340, tier: "Low" },
+    { m: "Gemma 3 27B", c: 0.040, inp: 0.080, out: 0.450, tier: "Low" },
+    { m: "Gemini 3.1 Flash Lite", c: 0.025, inp: 0.250, out: 1.500, tier: "Low" },
+  ] },
+  { company: "xAI", models: [
+    { m: "Grok 4.3", c: 0.200, inp: 1.250, out: 2.500, tier: "Mid" },
+    { m: "Grok 4.20", c: 0.200, inp: 1.250, out: 2.500, tier: "Mid" },
+    { m: "Grok 4.6", c: 0.500, inp: 2.000, out: 6.000, tier: "Mid" },
+    { m: "Grok 4.5", c: 0.300, inp: 2.000, out: 6.000, tier: "Mid" },
+  ] },
+  { company: "DeepSeek", models: [
+    { m: "DeepSeek V4 Pro 0813", c: 0.033, inp: 0.983, out: 2.950, tier: "Mid" },
+    { m: "DeepSeek V4 Pro 0423", c: 0.135, inp: 1.600, out: 3.200, tier: "Mid" },
+    { m: "DeepSeek V4 Flash Vision Exp", c: 0.007, inp: 0.220, out: 0.660, tier: "Low" },
+    { m: "DeepSeek V3", c: null, inp: 0.257, out: 1.029, tier: "Low" },
+    { m: "DeepSeek V4.1 Flash", c: 0.006, inp: 0.300, out: 1.200, tier: "Low" },
+  ] },
+  { company: "Alibaba", models: [
+    { m: "Qwen3 Coder Plus", c: 0.130, inp: 0.650, out: 3.250, tier: "Mid" },
+    { m: "Qwen3.5 397B A17B", c: 0.225, inp: 0.550, out: 3.500, tier: "Mid" },
+    { m: "Qwen3 Max Thinking", c: null, inp: 0.780, out: 3.900, tier: "Mid" },
+    { m: "Qwen3 VL 235B A22B Thinking", c: null, inp: 0.400, out: 4.000, tier: "Mid" },
+    { m: "Qwen3.7 Max", c: 0.295, inp: 1.475, out: 4.425, tier: "Mid" },
+    { m: "Qwen3.8 Max (0902)", c: 0.250, inp: 2.000, out: 6.000, tier: "Mid" },
+    { m: "Qwen3.8 2.4T A95B", c: 0.250, inp: 2.000, out: 6.000, tier: "Mid" },
+    { m: "Qwen3.6 Max Preview", c: null, inp: 1.027, out: 6.162, tier: "Mid" },
+    { m: "Qwen3.7 Flash", c: 0.006, inp: 0.030, out: 0.130, tier: "Low" },
+    { m: "Qwen2.5 7B Instruct", c: null, inp: 0.100, out: 0.200, tier: "Low" },
+    { m: "Qwen2.5 72B Instruct", c: null, inp: 0.360, out: 0.400, tier: "Low" },
+    { m: "Qwen Plus 0728", c: null, inp: 0.260, out: 0.780, tier: "Low" },
+    { m: "Qwen-Plus", c: 0.052, inp: 0.260, out: 0.780, tier: "Low" },
+    { m: "Qwen3 Coder Next", c: 0.070, inp: 0.120, out: 0.800, tier: "Low" },
+    { m: "Qwen3 Coder 480B A35B", c: 0.100, inp: 0.300, out: 1.000, tier: "Low" },
+    { m: "Qwen3 Next 80B A3B Thinking", c: null, inp: 0.150, out: 1.200, tier: "Low" },
+    { m: "Qwen3.7 Plus", c: 0.064, inp: 0.320, out: 1.280, tier: "Low" },
+    { m: "Qwen3.5 Plus 2026-02-15", c: null, inp: 0.260, out: 1.560, tier: "Low" },
+    { m: "Qwen3.5 Plus 2026-04-20", c: null, inp: 0.300, out: 1.800, tier: "Low" },
+    { m: "Qwen3 235B A22B", c: null, inp: 0.455, out: 1.820, tier: "Low" },
+    { m: "Qwen3.6 Plus", c: null, inp: 0.325, out: 1.950, tier: "Low" },
+    { m: "Qwen3.6 27B", c: 0.030, inp: 0.300, out: 2.000, tier: "Low" },
+    { m: "Qwen3.5-122B-A10B", c: null, inp: 0.260, out: 2.080, tier: "Low" },
+  ] },
+  { company: "Meta", models: [
+    { m: "Llama 4 Scout", c: null, inp: 0.100, out: 0.300, tier: "Low" },
+    { m: "Llama 4 Maverick", c: null, inp: 0.188, out: 0.652, tier: "Low" },
+  ] },
+  { company: "NVIDIA", models: [
+    { m: "Nemotron 3.5 Lightning", c: 0.040, inp: 0.080, out: 0.200, tier: "Low" },
+    { m: "Nemotron 3 Nano 30B A3B", c: 0.030, inp: 0.050, out: 0.200, tier: "Low" },
+    { m: "Nemotron 3 Super", c: null, inp: 0.080, out: 0.450, tier: "Low" },
+    { m: "Nemotron 3 Ultra", c: 0.120, inp: 0.600, out: 2.400, tier: "Low" },
+  ] },
+  { company: "Mistral", models: [
+    { m: "Mistral Large", c: 0.200, inp: 2.000, out: 6.000, tier: "Mid" },
+    { m: "Mistral Medium 3.5", c: null, inp: 1.500, out: 7.500, tier: "Mid" },
+    { m: "Ministral 3 3B 2512", c: 0.010, inp: 0.100, out: 0.100, tier: "Low" },
+    { m: "Ministral 3 14B 2512", c: 0.020, inp: 0.200, out: 0.200, tier: "Low" },
+    { m: "Mistral Small 3.2 24B", c: null, inp: 0.075, out: 0.200, tier: "Low" },
+    { m: "Mistral Small 4", c: 0.015, inp: 0.150, out: 0.600, tier: "Low" },
+    { m: "Codestral 2508", c: 0.030, inp: 0.300, out: 0.900, tier: "Low" },
+    { m: "Mistral Large 3 2512", c: 0.050, inp: 0.500, out: 1.500, tier: "Low" },
+    { m: "Devstral 2 2512", c: 0.040, inp: 0.400, out: 2.000, tier: "Low" },
+    { m: "Mistral Medium 3.1", c: 0.040, inp: 0.400, out: 2.000, tier: "Low" },
+    { m: "Mistral Medium 3", c: 0.040, inp: 0.400, out: 2.000, tier: "Low" },
+  ] },
+  { company: "Moonshot AI", models: [
+    { m: "Kimi K3", c: 0.303, inp: 2.648, out: 13.283, tier: "High" },
+    { m: "Kimi K2 Thinking", c: 0.150, inp: 0.600, out: 2.500, tier: "Mid" },
+    { m: "Kimi K2 0905", c: null, inp: 0.600, out: 2.500, tier: "Mid" },
+    { m: "Kimi K2.7 Code", c: 0.150, inp: 0.710, out: 3.500, tier: "Mid" },
+    { m: "Kimi K2.6", c: 0.160, inp: 0.950, out: 4.000, tier: "Mid" },
+    { m: "Kimi K2.5", c: 0.070, inp: 0.450, out: 2.250, tier: "Low" },
+    { m: "Kimi K2 0711", c: null, inp: 0.570, out: 2.300, tier: "Low" },
+  ] },
+  { company: "Zhipu", models: [
+    { m: "GLM 5.1", c: 0.179, inp: 0.966, out: 3.036, tier: "Mid" },
+    { m: "GLM 5V Turbo", c: 0.240, inp: 1.200, out: 4.000, tier: "Mid" },
+    { m: "GLM 5 Turbo", c: 0.240, inp: 1.200, out: 4.000, tier: "Mid" },
+    { m: "GLM 5.3", c: 0.260, inp: 1.400, out: 4.400, tier: "Mid" },
+    { m: "GLM 5.2", c: 0.140, inp: 1.400, out: 4.400, tier: "Mid" },
+    { m: "GLM 4.7", c: 0.080, inp: 0.400, out: 1.750, tier: "Low" },
+    { m: "GLM 4.6", c: 0.080, inp: 0.430, out: 1.750, tier: "Low" },
+    { m: "GLM 5", c: 0.120, inp: 0.600, out: 1.920, tier: "Low" },
+    { m: "GLM 4.5", c: 0.110, inp: 0.600, out: 2.200, tier: "Low" },
+  ] },
+  { company: "Amazon", models: [
+    { m: "Nova 2 Lite", c: null, inp: 0.300, out: 2.500, tier: "Mid" },
+    { m: "Nova Pro 1.0", c: null, inp: 0.800, out: 3.200, tier: "Mid" },
+    { m: "Nova Micro 1.0", c: null, inp: 0.035, out: 0.140, tier: "Low" },
+    { m: "Nova Lite 1.0", c: null, inp: 0.060, out: 0.240, tier: "Low" },
+  ] },
+  { company: "Upstage", models: [
+    { m: "Solar Pro 4", c: 0.018, inp: 0.090, out: 0.360, tier: "Low" },
+    { m: "Solar Pro 3", c: 0.015, inp: 0.150, out: 0.600, tier: "Low" },
+  ] },
+];;
+
+const TIER_ORDER = ['High', 'Mid', 'Low'];
+
+function fmt(c) {
+  return c === null || c === undefined ? '—' : '₹' + Math.round(c * PRICE_FX);
+}
+
+function loadPricing() {
+  const fx = document.getElementById('price-fx');
+  if (fx) fx.textContent = 'Per‑1M‑token list prices (output tier) · 1 USD ≈ ₹' + PRICE_FX;
+  const wrap = document.getElementById('price-table');
+  if (!wrap) return;
+  // Rebuild whole table: header + company-grouped tbody(s)
+  let html = '<thead><tr><th>Model</th><th class="num">Cached input</th><th class="num">Input ₹/M</th><th class="num">Output ₹/M</th><th>Tier</th></tr></thead>';
+  for (const grp of PRICE_CATALOG) {
+    html += '<tbody class="grp-head"><tr><th colspan="5">' + grp.company + '</th></tr></tbody>';
+    for (const t of TIER_ORDER) {
+      const rows = grp.models.filter(r => r.tier === t);
+      if (!rows.length) continue;
+      html += '<tbody class="grp-tier"><tr class="tier-'+t.toLowerCase()+'"><td colspan="5">' + t + '</td></tr></tbody>';
+      html += '<tbody>';
+      for (const r of rows) {
+        html += '<tr>'
+          + '<td>' + r.m + '</td>'
+          + '<td class="num">' + fmt(r.c) + '</td>'
+          + '<td class="num">' + fmt(r.inp) + '</td>'
+          + '<td class="num">' + fmt(r.out) + '</td>'
+          + '<td><span class="badge-tier ' + t.toLowerCase() + '">' + t + '</span></td>'
+          + '</tr>';
+      }
+      html += '</tbody>';
+    }
+  }
+  wrap.innerHTML = html;
+  const note = document.getElementById('price-note');
+  if (note) note.textContent = 'List price per 1M tokens (≈33,000–66,000 short messages). Actual cost depends on token count, caching and the exact model id the provider bills against. Prices are indicative — verify against the provider before trusting a number here.';
 }
 
 document.getElementById('save').addEventListener('click', async () => {

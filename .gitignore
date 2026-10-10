@@ -13,3 +13,6 @@ deepagent/.venv/
 deepagent/__pycache__/
 deepagent/workspace/
 *.log
+
+# aishe runtime data (moved from projects/aishe) — do not commit
+runtime/

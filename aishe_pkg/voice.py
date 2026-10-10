@@ -1,7 +1,12 @@
-"""Voice I/O — STT (Parakeet) and TTS (Supertonic) integration."""
+"""Voice I/O — Sarvam AI (Saaras v3 STT + Bulbul v3 TTS).
+
+Both speech endpoints run on Sarvam's cloud API using the same subscription key
+as the chat provider. No local STT/TTS sidecars are required.
+"""
 
 from __future__ import annotations
 
+import base64
 import os
 import platform
 import re
@@ -14,8 +19,23 @@ import requests
 from .config import get
 from .util import check, dim
 
-STT_URL = get("services.stt", "http://localhost:5093")
-TTS_URL = get("services.tts", "http://localhost:8766")
+SARVAM_BASE = "https://api.sarvam.ai"
+SARVAM_API_KEY = get("providers.sarvam.api_key", "")
+
+# Saaras v3 output mode: transcribe (spoken language) | translate (to English)
+# | verbatim | translit | codemix. See docs.sarvam.ai STT overview.
+STT_MODE = get("voice.stt_mode", "transcribe")
+# Config-driven so the desktop Voice section can switch it. `aishe doctor`
+# verifies the configured value really works against Sarvam.
+STT_MODEL = get("voice.stt_model", "saaras:v3")
+STT_TIMEOUT = 30
+
+# Bulbul v3 TTS: 11 languages, 30+ speakers. voice.default_voice maps to the
+# Bulbul speaker name (e.g. shubh, priya). language_code drives prosody.
+# Config-driven for the same reason as STT_MODEL.
+TTS_MODEL = get("voice.tts_model", "bulbul:v3")
+TTS_TIMEOUT = 60
+TTS_LANGUAGE = get("voice.language_code", "en-IN")
 
 _SYSTEM = platform.system()
 
@@ -27,59 +47,82 @@ def _play_audio(path: str) -> None:
     if _SYSTEM == "Darwin":
         subprocess.run(["afplay", path], capture_output=True)
     elif _SYSTEM == "Windows":
-        # Use PowerShell's SoundPlayer or built-in media player
         subprocess.run(["powershell", "-c", f"(New-Object Media.SoundPlayer '{path}').PlaySync();"], capture_output=True)
     elif _SYSTEM == "Linux":
-        # Try common Linux audio players
         for player in ["aplay", "paplay", "ffplay", "pw-play"]:
             if subprocess.run(["which", player], capture_output=True).returncode == 0:
                 subprocess.run([player, path], capture_output=True)
                 return
-        # Fallback: try ffmpeg
         subprocess.run(["ffmpeg", "-i", path, "-f", "s16le", "-ar", "44100", "-ac", "1", "-"], capture_output=True)
     else:
-        # Unknown OS — just log
         print(dim(f"  Audio saved to {path} (no player for {_SYSTEM})"))
 
 
-# ─── STT ────────────────────────────────────────────────────────────────────
+def _sarvam_headers() -> dict:
+    """Sarvam auth header. Raises a clear error if no key is configured."""
+    if not SARVAM_API_KEY:
+        raise RuntimeError(
+            "Sarvam API key not set — voice needs it. "
+            "Set providers.sarvam.api_key in ~/.config/aishe/config.yaml "
+            "(or run: aishe setup)."
+        )
+    return {"api-subscription-key": SARVAM_API_KEY}
+
+
+# ─── STT (Sarvam Saaras v3) ────────────────────────────────────────────────
 
 def transcribe(filepath: str) -> str:
-    """Transcribe an audio file via Parakeet STT. Returns text."""
+    """Transcribe an audio file via Sarvam Saaras v3. Returns text.
+
+    REST endpoint handles files up to 30s. PCM must be 16kHz; WAV is fine.
+    """
     with open(filepath, "rb") as f:
         resp = requests.post(
-            f"{STT_URL}/v1/audio/transcriptions",
+            f"{SARVAM_BASE}/speech-to-text",
+            headers=_sarvam_headers(),
             files={"file": (os.path.basename(filepath), f, "audio/wav")},
-            data={"model": "parakeet-tdt-0.6b-v3"},
-            timeout=30,
+            data={"model": STT_MODEL, "mode": STT_MODE},
+            timeout=STT_TIMEOUT,
         )
     resp.raise_for_status()
-    return resp.json().get("text", "").strip()
+    return resp.json().get("transcript", "").strip()
 
 
 def stt_health() -> bool:
-    return check(f"{STT_URL}/healthz")
+    """Voice STT is ready when a Sarvam key is configured.
+
+    Cloud endpoints have no local health endpoint, so the key is the gate.
+    """
+    return bool(SARVAM_API_KEY)
 
 
-# ─── TTS ────────────────────────────────────────────────────────────────────
+# ─── TTS (Sarvam Bulbul v3) ────────────────────────────────────────────────
 
-def synthesize(text: str, voice: str = "F4", play: bool = True) -> Optional[str]:
-    """Synthesize text to speech. Returns path to audio file if saved, None if played."""
+def synthesize(text: str, voice: str = "shubh", play: bool = True) -> Optional[str]:
+    """Synthesize text to speech via Sarvam Bulbul v3.
+
+    `voice` is a Bulbul speaker name (defaults to shubh). Returns the path to
+    the WAV file if play=False, else plays it and returns None.
+    """
     resp = requests.post(
-        f"{TTS_URL}/v1/audio/speech",
+        f"{SARVAM_BASE}/text-to-speech",
+        headers=_sarvam_headers(),
         json={
-            "input": text,
-            "voice": voice,
-            "model": "supertonic-3",
-            "response_format": "wav",
+            "text": text,
+            "language_code": TTS_LANGUAGE,
+            "speaker": voice,
+            "model": TTS_MODEL,
         },
-        timeout=60,
+        timeout=TTS_TIMEOUT,
     )
     resp.raise_for_status()
+    audios = resp.json().get("audios") or []
+    if not audios:
+        raise RuntimeError("Sarvam TTS returned no audio")
 
     outpath = f"/tmp/aishe_tts_{uuid.uuid4().hex[:8]}.wav"
     with open(outpath, "wb") as f:
-        f.write(resp.content)
+        f.write(base64.b64decode(audios[0]))
 
     if play:
         _play_audio(outpath)
@@ -123,12 +166,15 @@ def split_sentences(text: str) -> List[str]:
     return chunks
 
 
-def speak_stream(text: str, voice: str = "F4") -> None:
+def speak_stream(text: str, voice: str = "shubh") -> None:
     """Synthesize + play a full response, but speak it sentence-by-sentence.
 
     This lowers time-to-first-audio vs. waiting for the whole blob, and lets
     a caller stream tokens and speak each completed sentence as it arrives.
     For a single-shot string, it still chunks so long replies start sooner.
+
+    Note: Bulbul v3 accepts long-form text in one request, so chunking is now
+    purely for perceived latency, not an API requirement.
     """
     for chunk in split_sentences(text):
         if not chunk:
@@ -138,17 +184,13 @@ def speak_stream(text: str, voice: str = "F4") -> None:
 
 
 def tts_health() -> bool:
-    return check(f"{TTS_URL}/health")
+    """Voice TTS is ready when a Sarvam key is configured (cloud, no local health)."""
+    return bool(SARVAM_API_KEY)
 
 
 def tts_info() -> str:
-    """Get TTS model info."""
-    try:
-        r = requests.get(f"{TTS_URL}/health", timeout=3)
-        j = r.json()
-        return f"loaded={j.get('model_loaded', '?')}"
-    except Exception:
-        return ""
+    """TTS model info — which Sarvam voice/speaker is in use."""
+    return f"bulbul:v3/{get('voice.default_voice', 'shubh')}"
 
 
 # ─── Mic recording ──────────────────────────────────────────────────────────

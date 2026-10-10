@@ -36,7 +36,7 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "model": "deepseek-v4-flash",
-    "provider": "",  # sarvam | ollama-cloud | local | openrouter | opencode-go
+    "provider": "",  # sarvam | ollama-cloud | openrouter
     "providers": {
         "sarvam": {
             "base_url": "https://api.sarvam.ai/v1",
@@ -46,37 +46,36 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "base_url": "http://localhost:11434",
             "api_key": "",
         },
-        "local": {
-            "base_url": "http://localhost:8080",
-            "api_key": "",
-        },
         "openrouter": {
             "base_url": "https://openrouter.ai/api/v1",
-            "api_key": "",
-        },
-        "opencode-go": {
-            "base_url": "https://opencode.ai/zen/go/v1",
             "api_key": "",
         },
     },
     "services": {
         "deepagent": "http://localhost:8765",
         "ollama": "http://localhost:11434",
-        "stt": "http://localhost:5093",
-        "tts": "http://localhost:8766",
     },
     "voice": {
-        "default_voice": "F4",
+        # Voice runs on Sarvam cloud (Saaras v3 STT + Bulbul v3 TTS).
+        # default_voice = Bulbul speaker name (shubh, priya, neha, rahul, ...).
+        # language_code = TTS prosody language; stt_mode = Saaras v3 output mode.
+        # stt_model / tts_model = Sarvam model ids, switchable from the desktop
+        # Voice section.
+        "default_voice": "shubh",
+        "language_code": "en-IN",
+        "stt_model": "saaras:v3",
+        "tts_model": "bulbul:v3",
+        "stt_mode": "transcribe",
         "recording_duration": 5,
         "vad_enabled": True,
         "vad_threshold": 0.5,
         "vad_min_speech_duration_ms": 250,
         "vad_min_silence_duration_ms": 500,
     },
-    "live": {
-        "silence_ms": 500,        # live voice: reply after this much silence (Electron pet)
-        "min_speech_ms": 250,     # live voice: speech must last this long to count
-        "rms_threshold": 0.018,   # live voice: mic RMS level that counts as speech
+    "threads": {
+        # Every surface — CLI, Telegram, desktop — shares this ONE conversation
+        # id, so Aishe carries context across devices.
+        "id": "main",
     },
     "data": {
         "dir": _default_data_dir(),

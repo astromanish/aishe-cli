@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -144,26 +143,30 @@ def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def create(title: str = "") -> Dict[str, Any]:
-    """Create a new thread. Returns the thread dict."""
-    _init_db()
-    thread = {
-        "id": f"thr_{uuid.uuid4().hex}",
-        "title": title or "New thread",
-        "created_at": _now(),
-        "updated_at": _now(),
-        "messages": [],
-    }
-    conn = _connect()
-    try:
-        conn.execute(
-            "INSERT INTO threads (id, title, created_at, updated_at) VALUES (?,?,?,?)",
-            (thread["id"], thread["title"], thread["created_at"], thread["updated_at"]),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return thread
+# ─── Single thread ────────────────────────────────────────────────────────
+# Every surface — CLI, Telegram, desktop — shares ONE conversation. Aishe then
+# carries full context across surfaces: you start a thought on your phone and
+# finish it at your desk.
+#
+# There is no multi-thread mode any more. `create()` exists only so the shared
+# thread can be materialised on first use; `delete()` exists so the transcript
+# can be purged without touching the id.
+
+DEFAULT_THREAD_ID = "main"
+
+
+def resolve_thread_id(explicit: Optional[str] = None, surface: str = "") -> str:
+    """Return the shared thread id.
+
+    - explicit id (CLI --thread, desktop thread field) wins when provided, so a
+      one-off side conversation is still possible per call.
+    - otherwise the one shared id from config is returned.
+    """
+    from .config import get as cfg_get
+
+    if explicit:
+        return explicit
+    return str(cfg_get("threads.id", DEFAULT_THREAD_ID) or DEFAULT_THREAD_ID)
 
 
 def delete(thread_id: str) -> bool:
@@ -184,37 +187,6 @@ def delete(thread_id: str) -> bool:
         return True
     finally:
         conn.close()
-
-
-def get(thread_id: str) -> Optional[Dict[str, Any]]:
-    """Get a thread by ID (with messages)."""
-    _init_db()
-    conn = _connect()
-    try:
-        row = conn.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)).fetchone()
-        if not row:
-            return None
-        msgs = conn.execute(
-            "SELECT role, content, timestamp FROM messages WHERE thread_id = ? ORDER BY id",
-            (thread_id,),
-        ).fetchall()
-        return {
-            "id": row["id"],
-            "title": row["title"],
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-            "messages": [dict(m) for m in msgs],
-        }
-    finally:
-        conn.close()
-
-
-def ensure_thread(thread_id: str, title: str = "") -> Dict[str, Any]:
-    """Get an existing thread or create it on first use."""
-    t = get(thread_id)
-    if t:
-        return t
-    return create(title=title or thread_id)
 
 
 def add_message(thread_id: str, role: str, content: str) -> Optional[Dict[str, Any]]:
@@ -257,25 +229,6 @@ def add_message(thread_id: str, role: str, content: str) -> Optional[Dict[str, A
         conn.close()
 
 
-def list_all() -> List[Dict[str, Any]]:
-    """List all threads (with message count), sorted by updated_at descending."""
-    _init_db()
-    conn = _connect()
-    try:
-        rows = conn.execute(
-            "SELECT t.*, (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) AS message_count "
-            "FROM threads t ORDER BY t.updated_at DESC"
-        ).fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            d["messages"] = []
-            out.append(d)
-        return out
-    finally:
-        conn.close()
-
-
 def count() -> int:
     """Count threads."""
     _init_db()
@@ -283,51 +236,6 @@ def count() -> int:
     try:
         row = conn.execute("SELECT COUNT(*) AS c FROM threads").fetchone()
         return row["c"] if row else 0
-    finally:
-        conn.close()
-
-
-def search(query: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """Full-text search across all thread messages (FTS5; LIKE fallback)."""
-    _init_db()
-    conn = _connect()
-    try:
-        rows = []
-        try:
-            q = _escape_fts(query)
-            if q:
-                rows = conn.execute(
-                    "SELECT m.id, m.thread_id, m.role, m.content, m.timestamp, t.title "
-                    "FROM messages_fts "
-                    "JOIN messages m ON m.id = messages_fts.rowid "
-                    "JOIN threads t ON t.id = m.thread_id "
-                    "WHERE messages_fts MATCH ? ORDER BY m.id DESC LIMIT ?",
-                    (q, limit),
-                ).fetchall()
-        except sqlite3.OperationalError:
-            pass
-        if not rows:
-            like = f"%{query}%"
-            rows = conn.execute(
-                "SELECT m.id, m.thread_id, m.role, m.content, m.timestamp, t.title "
-                "FROM messages m JOIN threads t ON t.id = m.thread_id "
-                "WHERE m.content LIKE ? ORDER BY m.id DESC LIMIT ?",
-                (like, limit),
-            ).fetchall()
-
-        # Group matches by thread, mirroring the old JSON API shape.
-        threads: Dict[str, Dict[str, Any]] = {}
-        for r in rows:
-            tid = r["thread_id"]
-            if tid not in threads:
-                threads[tid] = {
-                    "thread": {"id": tid, "title": r["title"], "updated_at": r["timestamp"]},
-                    "matches": [],
-                }
-            threads[tid]["matches"].append(
-                {"role": r["role"], "content": r["content"], "timestamp": r["timestamp"]}
-            )
-        return list(threads.values())
     finally:
         conn.close()
 
@@ -362,27 +270,3 @@ def search_sessions(query: str, limit: int = 10) -> List[Dict[str, Any]]:
         return [dict(r) for r in rows]
     finally:
         conn.close()
-
-
-def export_markdown(thread_id: str, path: str) -> int:
-    """Export a thread to Markdown. Returns message count."""
-    t = get(thread_id)
-    if not t:
-        return 0
-    with open(path, "w") as f:
-        f.write(f"# {t['title']}\n\n")
-        f.write(f"*ID: `{t['id']}` | Created: {t['created_at']} | Updated: {t['updated_at']}*\n\n")
-        f.write("---\n\n")
-        for msg in t.get("messages", []):
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            ts = msg.get("timestamp", "")
-            if role == "user":
-                f.write(f"## User\n\n{content}\n\n")
-            elif role == "assistant":
-                f.write(f"## Aishe\n\n{content}\n\n")
-            else:
-                f.write(f"## {role.capitalize()}\n\n{content}\n\n")
-            if ts:
-                f.write(f"*{ts}*\n\n")
-    return len(t.get("messages", []))

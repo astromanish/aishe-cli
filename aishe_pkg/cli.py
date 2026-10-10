@@ -6,12 +6,10 @@ import argparse
 import json
 import os
 import platform
-import queue
 import shutil
 import subprocess
 import sys
-import threading
-from datetime import datetime
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -20,17 +18,17 @@ import requests
 from . import __version__
 from .config import cmd_config, get, get_config_path, load
 from .memory import cmd_memory, count as mem_count
-from .threads import add_message as thr_add_message, count as thr_count
+from .threads import (
+    add_message as thr_add_message,
+    count as thr_count,
+    resolve_thread_id,
+)
 from .util import (
     bold, check, cyan, dim, green, red, yellow,
     header, section, bullet, status_dot, key_value,
 )
+# Voice helpers kept for `aishe doctor` diagnostics (STT/TTS roundtrip tests).
 from .voice import (
-    list_mic_devices,
-    record_audio,
-    record_with_vad,
-    speak_stream,
-    split_sentences,
     stt_health,
     synthesize,
     transcribe,
@@ -129,7 +127,7 @@ def cmd_repl_stream(args: Any) -> None:
         print(red("DeepAgent is down on :8765"))
         sys.exit(1)
 
-    tid = getattr(args, "thread", None) or "cli"
+    tid = resolve_thread_id()
 
     # One-shot: message provided as arg, or piped via stdin (non-TTY)
     msg = " ".join(args.message) if isinstance(getattr(args, "message", None), list) else getattr(args, "message", "")
@@ -161,260 +159,94 @@ def cmd_repl_stream(args: Any) -> None:
         print(dim("─" * 50))
 
 
-# ─── Live Voice ──────────────────────────────────────────────────────────────
+# ─── Doctor ─────────────────────────────────────────────────────────────────
 
-def cmd_live(args: Any) -> None:
-    """`aishe live` — native Electron lite app (pixel pet); --cli keeps the terminal REPL."""
-    if getattr(args, "cli", False):
-        _cmd_live_cli(args)
-    else:
-        _launch_electron_live(args)
-
-
-def _launch_electron_live(args: Any) -> None:
-    """Launch the Aishe Live Electron lite app — a native pixel-pet window.
-
-    The app talks directly to DeepAgent/Parakeet/Supertonic from its main
-    process — no localhost web server involved. Requires one-time
-    `cd electron-live && npm install` (setup.sh does this automatically).
-    """
+def _desktop_app_dir() -> Optional[str]:
+    """Locate the Aishe desktop app directory, or None."""
     candidates = [
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "electron-live"),
-        os.path.expanduser("~/.local/share/aishe-cli/electron-live"),
+        os.path.expanduser("~/Documents/projects/aishe-desktop"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "aishe-desktop"),
+        os.path.expanduser("~/.local/share/aishe-cli/aishe-desktop"),
     ]
-    app_dir = next((c for c in candidates if os.path.isdir(c)), None)
+    return next((c for c in candidates if os.path.isdir(c)), None)
+
+
+def _desktop_launcher(app_dir: str) -> Optional[str]:
+    """Path to the app's launcher script, or None.
+
+    Prefer run.sh: it recovers WAYLAND_DISPLAY / XDG_RUNTIME_DIR from the user
+    session (Electron otherwise dies with "Failed to connect to Wayland
+    display") and applies the software-rendering flags this machine's Intel iGPU
+    needs. Launching electron directly works only when those vars already happen
+    to be set, which is why `aishe desktop` used to look fine from a terminal but
+    fail everywhere else.
+    """
+    script = os.path.join(app_dir, "run.sh")
+    if os.path.exists(script) and os.access(script, os.X_OK):
+        return script
+    return None
+
+
+def _launch_desktop_app(tab: Optional[str] = None) -> None:
+    """Launch the full Aishe desktop client, optionally focused on a tab."""
+    app_dir = _desktop_app_dir()
     if not app_dir:
-        print(red("Aishe Live app not found."))
-        print(dim("  Run: cd electron-live && npm install   (or rerun setup.sh)"))
+        print(red("Aishe desktop app not found."))
+        print(dim("  Expected aishe-desktop/ next to this CLI, or in ~/.local/share/aishe-cli/"))
         sys.exit(1)
 
     electron = os.path.join(app_dir, "node_modules", ".bin", "electron")
     if not os.path.exists(electron):
-        print(red("Aishe Live app not installed."))
+        print(red("Aishe desktop app dependencies are not installed."))
         print(dim(f"  Run: cd {app_dir} && npm install"))
         sys.exit(1)
 
-    print(f"  Launching Aishe Live ({dim(app_dir)})")
-    subprocess.Popen(
-        [electron, app_dir],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    launcher = _desktop_launcher(app_dir)
+    if launcher:
+        cmd = [launcher]
+    else:
+        cmd = [electron, app_dir]
 
+    if tab:
+        cmd.append(f"--tab={tab}")
+    print(f"  Launching Aishe desktop ({dim(app_dir)})")
 
-def _cmd_live_cli(args: Any) -> None:
-    if not stt_health():
-        print(red("Parakeet STT is down on :5093"))
+    # Capture stderr instead of DEVNULL: Electron's Wayland/GPU failures used to
+    # vanish here, so a failed launch looked identical to a working one. The
+    # child keeps running after we return — this is not a wait.
+    log_dir = os.path.join(app_dir, ".logs")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        log = open(os.path.join(log_dir, "launch.log"), "ab", buffering=0)
+    except OSError:
+        log = subprocess.DEVNULL
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
+    except OSError as e:
+        print(red(f"Could not launch: {e}"))
         sys.exit(1)
-    if not tts_health():
-        print(red("Supertonic TTS is down on :8766"))
+
+    # Give Electron a moment to fail fast. A process that exits immediately is a
+    # launch failure, and reporting it beats printing "Launching…" and exiting 0.
+    #
+    # exit code 0 is NOT a failure here: when the app is already running, the
+    # single-instance lock in main.js quits the newcomer cleanly after handing
+    # focus to the existing window. Only a non-zero exit is a real problem.
+    time.sleep(2.5)
+    code = proc.poll()
+    if code:
+        print(red(f"Aishe desktop exited immediately (code {code})."))
+        print(dim(f"  Log: {os.path.join(log_dir, 'launch.log')}"))
         sys.exit(1)
-    if not check(f"{DEEPAGENT_URL}/health"):
-        print(red("DeepAgent is down on :8765"))
-        sys.exit(1)
 
-    devices = list_mic_devices()
-    if not devices:
-        print(red("No microphone devices found"))
-        sys.exit(1)
-
-    device_idx = args.device
-    if device_idx is None:
-        for idx, name in devices:
-            if "macbook" in name.lower() or "built-in" in name.lower() or "microphone" in name.lower():
-                device_idx = idx
-                break
-        if device_idx is None:
-            device_idx = devices[0][0]
-
-    vad_enabled = get("voice.vad_enabled", True) and not args.no_vad
-    duration = args.duration or get("voice.recording_duration", 5)
-    voice = args.voice or get("voice.default_voice", "F4")
-
-    print(bold("Live Voice Mode"))
-    print(f"  Mic: {cyan(f'[{device_idx}]')} {dict(devices).get(device_idx, '?')}")
-    print(f"  STT: {green('Parakeet')}  TTS: {green('Supertonic')}  LLM: {green('DeepAgent')}")
-    print(f"  Voice: {cyan(voice)}  VAD: {cyan('on' if vad_enabled else 'off')}  Thread: {args.thread}")
-    print()
-    print(dim("Press Enter to record and speak. Ctrl+C to exit."))
-    print("─" * 50)
-
-    tid = args.thread or "live"
-    consecutive_errors = 0
-
-    while True:
-        try:
-            user_input = input(bold("\nYou ▶ ")).strip()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n{dim('Goodbye!')}")
-            break
-
-        if not user_input:
-            print(dim("  🔴 Recording..."), end="", flush=True)
-            recpath = f"/tmp/aishe_live_rec_{datetime.now().strftime('%H%M%S%f')}.wav"
-
-            if vad_enabled:
-                ok = record_with_vad(
-                    device_idx, recpath,
-                    threshold=get("voice.vad_threshold", 0.5),
-                    min_speech_ms=get("voice.vad_min_speech_duration_ms", 250),
-                    min_silence_ms=get("voice.vad_min_silence_duration_ms", 500),
-                )
-            else:
-                ok = record_audio(duration, device_idx, recpath)
-
-            if not ok:
-                print(f"\r  {red('No speech detected')}                    ")
-                continue
-
-            print(f"\r  {green('● Recorded')} → transcribing...", end="", flush=True)
-            try:
-                user_text = transcribe(recpath)
-            except Exception as e:
-                print(f"\r  {red(f'STT error: {e}')}                    ")
-                if os.path.exists(recpath):
-                    os.unlink(recpath)
-                consecutive_errors += 1
-                if consecutive_errors >= 3:
-                    print(red("Too many STT errors. Check Parakeet server."))
-                    break
-                continue
-            finally:
-                if os.path.exists(recpath):
-                    os.unlink(recpath)
-
-            if not user_text:
-                print(f"\r  {yellow('(empty transcription)')}                    ")
-                continue
-
-            print(f"\r  {green('>')} {green(user_text)}                    ")
-            consecutive_errors = 0
-        else:
-            user_text = user_input
-            print(f"\n{green('>')} {green(user_input)}")
-
-        # Persist user turn
-        thr_add_message(tid, "user", user_text)
-
-        try:
-            r = requests.post(
-                f"{DEEPAGENT_URL}/stream",
-                json={"message": user_text, "thread_id": tid},
-                stream=True,
-                timeout=120,
-            )
-            r.raise_for_status()
-        except Exception as e:
-            print(f"\n  {red(f'DeepAgent error: {e}')}")
-            continue
-
-        answer = ""
-        tool_calls: List[str] = []
-        in_tool = False
-        spoken = set()
-
-        # ─── Voice-only response ───────────────────────────────────────────
-        # No chat text on screen. Tokens accumulate into a sentence buffer;
-        # each completed sentence is pushed to a single FIFO playback queue.
-        # ONE consumer thread drains it serially — sentences play one at a
-        # time, never overlapping. TTS still overlaps with the LLM streaming.
-        speak_voice = voice if (not args.no_tts) else None
-
-        audio_q: "queue.Queue[str]" = queue.Queue()
-
-        def _speak(sentence: str) -> None:
-            audio_q.put(sentence)
-
-        def _player() -> None:
-            # single consumer: pop one sentence, speak it fully, then the next
-            while True:
-                sentence = audio_q.get()
-                if sentence is None:
-                    audio_q.task_done()
-                    break
-                try:
-                    speak_stream(sentence, voice=voice)
-                except Exception:
-                    pass
-                finally:
-                    audio_q.task_done()
-
-        if speak_voice is not None:
-            threading.Thread(target=_player, daemon=True).start()
-
-        buf = ""
-        queued = 0
-        for line in r.iter_lines():
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            etype = ev.get("event", "")
-            if etype == "tool_call":
-                tool_calls.append(ev.get("name", "?"))
-                in_tool = True
-            elif etype == "tool_result":
-                in_tool = True
-            elif etype == "token":
-                tok = ev.get("content", "")
-                if not tok:
-                    continue
-                answer += tok
-                # live progress indicator
-                print(f"\r  {dim('▸ thinking')} {green(bold(str(len(answer))))} chars", end="", flush=True)
-                if speak_voice is None:
-                    continue
-                buf += tok
-                # Flush completed sentences. Guard: skip the final chunk so we
-                # don't double-speak it, and never buffer forever.
-                if len(buf) >= 300:
-                    _speak(buf)
-                    queued += 1
-                    buf = ""
-                else:
-                    for s in split_sentences(buf):
-                        if s in spoken:
-                            continue
-                        if buf.endswith(s):
-                            break  # incomplete — still buffering
-                        spoken.add(s)
-                        _speak(s)
-                        queued += 1
-                        buf = buf[len(s):]
-            elif etype == "final":
-                if not answer:
-                    answer = ev.get("answer", "")
-
-        # Speak any remaining tail (final partial sentence) if not already spoken
-        if speak_voice is not None:
-            for s in split_sentences(buf):
-                if s and s not in spoken:
-                    _speak(s)
-                    queued += 1
-            # if the model's answer arrived only via `final` (no tokens),
-            # speak the whole thing once
-            if not spoken and answer.strip():
-                _speak(answer)
-                queued += 1
-
-        # Persist assistant turn
-        if answer:
-            thr_add_message(tid, "assistant", answer)
-
-        # final progress indicator (thinking → speaking), clear the line
-        if speak_voice is not None:
-            audio_q.put(None)  # graceful stop signal for the player
-            print(f"\r  {dim('▸ speaking')} {green(bold(str(queued)))} phrases{' ' * 20}", end="", flush=True)
-            audio_q.join()     # wait for the queue to finish playing (silent drain)
-            print(f"\r  {green('✓')} replied — {green(bold(str(queued)))} phrases{' ' * 20}")
-        else:
-            print(f"\r  {green('✓')} replied — {dim(str(len(answer)) + ' chars')}{' ' * 20}")
+    print(green(f"  Aishe desktop is running (pid {proc.pid})"))
 
 
-# ─── Doctor ─────────────────────────────────────────────────────────────────
+def cmd_desktop(args: Any) -> None:
+    """`aishe desktop` — launch the full desktop client."""
+    _launch_desktop_app(tab=getattr(args, "tab", None))
+
 
 def cmd_doctor(args: Any) -> None:
     """Comprehensive diagnostics — check all services, test roundtrips."""
@@ -470,8 +302,6 @@ def cmd_doctor(args: Any) -> None:
     services = [
         ("DeepAgent", get("services.deepagent", ":8765"), "/health"),
         ("Ollama", get("services.ollama", ":11434"), "/api/tags"),
-        ("Parakeet STT", get("services.stt", ":5093"), "/healthz"),
-        ("Supertonic TTS", get("services.tts", ":8766"), "/health"),
     ]
     for name, base, endpoint in services:
         url = f"{base}{endpoint}"
@@ -484,8 +314,6 @@ def cmd_doctor(args: Any) -> None:
                 extra = f" ({len(models)} models)"
             except Exception:
                 pass
-        elif ok and name == "Supertonic TTS":
-            extra = f" ({tts_info()})"
         print(f"  {status_dot(ok)} {name:20s} {green('UP') if ok else red('DOWN')}{dim(extra)}")
 
     # 5. Data
@@ -496,7 +324,7 @@ def cmd_doctor(args: Any) -> None:
     print(f"  {bullet('Threads')} {cyan(str(thr_cnt))}")
 
     # 6. STT roundtrip test
-    section("STT Roundtrip")
+    section("STT Roundtrip (Sarvam Saaras v3)")
     if stt_health():
         test_wav = "/tmp/aishe_test_stt.wav"
         subprocess.run(
@@ -514,23 +342,23 @@ def cmd_doctor(args: Any) -> None:
             if os.path.exists(test_wav):
                 os.unlink(test_wav)
     else:
-        print(f"  {yellow('⚠ Skipped (STT down)')}")
+        print(f"  {yellow('⚠ Skipped (no Sarvam key)')}")
 
     # 7. TTS roundtrip test
-    section("TTS Roundtrip")
+    section("TTS Roundtrip (Sarvam Bulbul v3)")
     if tts_health():
         try:
             out = synthesize("test", play=False)
             if out and os.path.exists(out):
                 size = os.path.getsize(out)
                 os.unlink(out)
-                print(f"  {status_dot(True)} {green('TTS responds')} {dim(f'({size} bytes)')}")
+                print(f"  {status_dot(True)} {green('TTS responds')} {dim(f'({size} bytes · {tts_info()})')}")
             else:
                 print(f"  {status_dot(True)} {green('TTS responds')}")
         except Exception as e:
             print(f"  {status_dot(False)} {red(f'TTS error: {e}')}")
     else:
-        print(f"  {yellow('⚠ Skipped (TTS down)')}")
+        print(f"  {yellow('⚠ Skipped (no Sarvam key)')}")
 
     # 8. DeepAgent roundtrip
     section("DeepAgent Roundtrip")
@@ -580,9 +408,7 @@ def cmd_version(args: Any) -> None:
 # Provider registry: config key → display info.
 #   - sarvam       Sarvam cloud API (OpenAI-compatible)
 #   - ollama-cloud Ollama :cloud models via the local Ollama server
-#   - local        llama.cpp llama-server (GGUF, OpenAI-compatible)
 #   - openrouter   OpenRouter (OpenAI-compatible)
-#   - opencode-go  OpenCode relay (OpenAI-compatible)
 SETUP_PROVIDERS: Dict[str, Dict[str, Any]] = {
     "sarvam": {
         "label": "Sarvam (cloud API)",
@@ -596,19 +422,12 @@ SETUP_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "fallback_models": ["sarvam-105b-conversations", "sarvam-105b"],
     },
     "ollama-cloud": {
-        "label": "Ollama cloud (:cloud models via local Ollama)",
+        "label": "Ollama Cloud (:cloud models via local Ollama)",
         "base_url": "http://localhost:11434",
         "needs_key": False,
         "key_default": "ollama",
         "models_url": "/api/tags",
         "ollama": True,
-    },
-    "local": {
-        "label": "Local llama.cpp (GGUF via llama-server)",
-        "base_url": "http://localhost:8080",
-        "needs_key": False,
-        "models_url": "/v1/models",
-        "llamacpp": True,
     },
     "openrouter": {
         "label": "OpenRouter (cloud API)",
@@ -617,16 +436,9 @@ SETUP_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "key_hint": "Get a key from https://openrouter.ai/keys",
         "models_url": "/models",
     },
-    "opencode-go": {
-        "label": "OpenCode (opencode.ai relay)",
-        "base_url": "https://opencode.ai/zen/go/v1",
-        "needs_key": True,
-        "key_hint": "Get a key from https://opencode.ai",
-        "models_url": "/models",
-    },
 }
 
-_PROVIDER_ORDER = ["sarvam", "ollama-cloud", "local", "openrouter", "opencode-go"]
+_PROVIDER_ORDER = ["sarvam", "ollama-cloud", "openrouter"]
 
 
 def _setup_input(prompt: str) -> str:
@@ -684,46 +496,6 @@ def _fetch_models(provider: str, info: Dict[str, Any], prov_cfg: Dict[str, Any])
         return []
 
 
-def _find_ggufs() -> List[str]:
-    """Find .gguf files in common model directories (bounded)."""
-    dirs = [
-        Path.home() / "models",
-        Path.home() / "Downloads",
-        Path.home() / "llama.cpp" / "models",
-        Path.home() / ".cache" / "llama.cpp",
-        Path("/opt/local/models"),
-        Path("/usr/local/models"),
-    ]
-    found: List[str] = []
-    for d in dirs:
-        if not d.is_dir():
-            continue
-        try:
-            for p in d.rglob("*.gguf"):
-                found.append(str(p))
-                if len(found) >= 15:
-                    break
-        except Exception:
-            continue
-        if len(found) >= 15:
-            break
-    return found
-
-
-def _find_llama_server() -> Optional[str]:
-    exe = shutil.which("llama-server")
-    if exe:
-        return exe
-    for p in [
-        "/opt/homebrew/bin/llama-server",
-        "/usr/local/bin/llama-server",
-        str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-server"),
-    ]:
-        if os.path.exists(p):
-            return p
-    return None
-
-
 def _setup_models() -> None:
     """Provider → API key → model selection, then save + restart DeepAgent."""
     from .config import get as cfg_get, set_key as cfg_set
@@ -760,39 +532,18 @@ def _setup_models() -> None:
 
     models: List[str] = []
 
-    if info.get("llamacpp"):
-        # llama.cpp: list the loaded model + GGUF files on disk
-        loaded = _fetch_models(provider, info, prov_cfg)
-        if loaded:
-            print(f"  Loaded in llama-server: {cyan(loaded[0])}")
-        ggufs = _find_ggufs()
-        if not ggufs:
-            print(dim("  No .gguf files found in common model dirs."))
-            gguf = _setup_input("  GGUF path (e.g. ~/models/qwen2.5-7b-q4.gguf) ▶ ")
-            if gguf:
-                models = [os.path.expanduser(gguf)]
-        else:
-            print("  GGUF files found:")
-            for i, g in enumerate(ggufs, 1):
-                print(f"    [{i}] {dim(os.path.basename(g))}  ({os.path.dirname(g)})")
-            gguf_choice = _setup_input("  Pick a GGUF, or paste a path ▶ ")
-            if gguf_choice.isdigit() and 1 <= int(gguf_choice) <= len(ggufs):
-                models = [ggufs[int(gguf_choice) - 1]]
-            elif gguf_choice:
-                models = [os.path.expanduser(gguf_choice.strip())]
+    models = _fetch_models(provider, info, prov_cfg)
+    if models:
+        # Cloud providers can list hundreds (OpenRouter) — show a capped list,
+        # but any id can still be typed directly.
+        shown = models if len(models) <= 40 else models[:40]
+        for i, m in enumerate(shown, 1):
+            marker = "●" if m == current_model else "○"
+            print(f"  {marker} [{i}] {cyan(m)}")
+        if len(models) > 40:
+            print(dim(f"  … and {len(models) - 40} more — you can type any model id."))
     else:
-        models = _fetch_models(provider, info, prov_cfg)
-        if models:
-            # Cloud providers can list hundreds (OpenRouter) — show a capped list,
-            # but any id can still be typed directly.
-            shown = models if len(models) <= 40 else models[:40]
-            for i, m in enumerate(shown, 1):
-                marker = "●" if m == current_model else "○"
-                print(f"  {marker} [{i}] {cyan(m)}")
-            if len(models) > 40:
-                print(dim(f"  … and {len(models) - 40} more — you can type any model id."))
-        else:
-            print(dim("  Could not fetch models — enter a model id manually."))
+        print(dim("  Could not fetch models — enter a model id manually."))
 
     # 4. Select model
     section("Select Model")
@@ -821,34 +572,7 @@ def _setup_models() -> None:
     print(f"  {green('✓')} provider = {cyan(provider)}")
     print(f"  {green('✓')} model    = {cyan(selected)}")
 
-    # 6. Local llama.cpp — start/restart llama-server if needed
-    if info.get("llamacpp") and models:
-        server_bin = _find_llama_server()
-        if server_bin:
-            base = prov_cfg["base_url"].rstrip("/")
-            port = base.rsplit(":", 1)[-1] if ":" in base else "8080"
-            section("llama-server")
-            print(f"  Starting {cyan(server_bin)} with {dim(os.path.basename(selected))}…")
-            try:
-                lsof = subprocess.run(["lsof", "-t", f"-i:{port}"], capture_output=True, text=True, timeout=5)
-                for pid in lsof.stdout.split():
-                    subprocess.run(["kill", pid], check=False)
-            except Exception:
-                pass
-            env = dict(os.environ)
-            env["LLAMA_SERVER_PORT"] = port
-            subprocess.Popen(
-                [server_bin, "-m", selected, "-c", "4096", "--port", port, "--host", "127.0.0.1"],
-                stdout=open("/tmp/llamaserver.log", "a"),
-                stderr=subprocess.STDOUT,
-                env=env,
-            )
-            print(f"  {green('✓')} llama-server starting on :{port} (log: /tmp/llamaserver.log)")
-        else:
-            print(yellow("  llama-server binary not found — start it yourself, e.g.:"))
-            print(dim(f"    llama-server -m {selected} -c 4096 --port 8080"))
-
-    # 7. Restart DeepAgent to apply the provider + model
+    # 6. Restart DeepAgent to apply the provider + model
     _restart_deepagent(provider, selected)
 
     print()
@@ -866,9 +590,6 @@ def _deepagent_env(provider: str, model: str, prov_cfg: Dict[str, Any]) -> Dict[
     if provider == "ollama-cloud":
         env["AISHE_BASE_URL"] = f"{base}/v1"
         env["AISHE_API_KEY"] = api_key or "ollama"
-    elif provider == "local":
-        env["AISHE_BASE_URL"] = f"{base}/v1"
-        env["AISHE_API_KEY"] = api_key or ""
     else:
         # OpenAI-compatible cloud providers: the SDK appends /chat/completions,
         # so the base must end in /v1 (Sarvam needs it added explicitly).
@@ -1127,7 +848,6 @@ def main() -> None:
         epilog="""Examples:
   aishe                         — interactive streaming chat
   aishe "Tell me a joke"        — one-shot streaming chat
-  aishe live                    — live voice conversation
   aishe doctor                  — run diagnostics
   aishe config                  — view config
   aishe config set voice.default_voice M1
@@ -1138,11 +858,11 @@ def main() -> None:
     # Bare `aishe` accepts an optional message (one-shot) or none (interactive).
     # Intercept before argparse: if the first arg isn't a known subcommand,
     # treat everything as a message.
-    _KNOWN = {"status", "live", "memory", "config", "doctor", "version", "setup", "telegram", "gateway", "dashboard", "search", "-h", "--help"}
+    _KNOWN = {"status", "desktop", "memory", "config", "doctor", "version", "setup", "telegram", "gateway", "dashboard", "search", "-h", "--help"}
     _argv = sys.argv[1:]
     if _argv and _argv[0] not in _KNOWN:
         msg = " ".join(_argv)
-        _stream_once(msg, "cli")
+        _stream_once(msg, resolve_thread_id())
         return
 
     sub = parser.add_subparsers(dest="command")
@@ -1150,16 +870,9 @@ def main() -> None:
     # status
     sub.add_parser("status", help="Check all service statuses")
 
-    # live
-    p_live = sub.add_parser("live", help="Live voice — native Electron pixel-pet app (default) or terminal REPL (--cli)")
-    p_live.add_argument("-d", "--device", type=int, default=None, help="Mic device index (terminal REPL mode)")
-    p_live.add_argument("--duration", type=int, default=None, help="Recording duration in seconds (default: config)")
-    p_live.add_argument("-t", "--thread", default="live", help="Thread ID")
-    p_live.add_argument("-V", "--voice", default=None, help="TTS voice (F1-F5, M1-M5)")
-    p_live.add_argument("--no-tts", action="store_true", help="Don't speak responses")
-    p_live.add_argument("--no-vad", action="store_true", help="Disable VAD (use fixed duration)")
-    p_live.add_argument("--list", action="store_true", help="List mic devices and exit")
-    p_live.add_argument("--cli", action="store_true", help="Terminal voice REPL (press Enter to record) instead of the Electron app")
+    # desktop — full GUI covering every CLI capability
+    p_desktop = sub.add_parser("desktop", help="Open the Aishe desktop app (chat, voice, memory, sessions, services, config, doctor)")
+    p_desktop.add_argument("--tab", default=None, choices=["chat", "memory", "sessions", "keys"], help="Tab to open on launch")
 
     # memory
     p_mem = sub.add_parser("memory", help="Memory management (vector + short-term files)")
@@ -1207,18 +920,6 @@ def main() -> None:
         cmd_repl_stream(args)
         return
 
-    # Handle --list for live before dispatch
-    if args.command == "live" and hasattr(args, "list") and args.list:
-        devices = list_mic_devices()
-        if devices:
-            print(bold("Available microphone devices:"))
-            for idx, name in devices:
-                print(f"  [{idx}] {name}")
-            print(dim("\nUse: aishe live -d <index>"))
-        else:
-            print(red("No microphone devices found"))
-        sys.exit(0)
-
     # Handle config specially (it has its own sub-subcommands)
     if args.command == "config":
         if not args.action:
@@ -1252,7 +953,7 @@ def main() -> None:
 
     dispatch: Dict[str, Any] = {
         "status": cmd_status,
-        "live": cmd_live,
+        "desktop": cmd_desktop,
         "memory": cmd_memory,
         "search": cmd_search_sessions,
         "doctor": cmd_doctor,
@@ -1295,8 +996,6 @@ def cmd_status(args: Any = None) -> None:
     services = [
         ("Ollama", get("services.ollama", "http://localhost:11434"), "/api/tags"),
         ("DeepAgent", get("services.deepagent", "http://localhost:8765"), "/health"),
-        ("Parakeet STT", get("services.stt", "http://localhost:5093"), "/healthz"),
-        ("Supertonic TTS", get("services.tts", "http://localhost:8766"), "/health"),
     ]
 
     section("Services")
@@ -1311,11 +1010,15 @@ def cmd_status(args: Any = None) -> None:
                 extra = f" ({len(models)} models)"
             except Exception:
                 pass
-        elif ok and name == "Supertonic TTS":
-            extra = f" ({tts_info()})"
         dot = status_dot(ok)
         status_text = green("UP") if ok else red("DOWN")
         print(f"  {dot} {name:16s} {status_text}{dim(extra)}")
+
+    section("Voice (Sarvam)")
+    if stt_health() and tts_health():
+        print(f"  {status_dot(True)} {green('Ready')} {dim(f'· {tts_info()}')}")
+    else:
+        print(f"  {status_dot(False)} {red('No Sarvam key')} {dim('· set providers.sarvam.api_key')}")
 
     section("Data")
     mem_cnt = mem_count()
