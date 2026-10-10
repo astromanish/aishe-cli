@@ -91,6 +91,41 @@ conn.close()
 check("all messages persisted", msg_rows >= 4, f"messages={msg_rows}")
 check("still exactly one thread", threads.count() == 1)
 
+
+section("cross-module contract: threads.get()")
+
+# deepagent/server.py does `from aishe_pkg.threads import get as threads_get`.
+# That helper did not exist — the module had a bare `get(thread_id)` call that
+# resolved to the config import and raised NameError. The import failure only
+# surfaced when DeepAgent restarted, so pin the contract here.
+check("threads.get is importable", callable(threads.get))
+
+threads.add_message("main", "user", "contract check message")
+row = threads.get("main")
+check("get returns the thread row", isinstance(row, dict) and row.get("id") == "main", f"row={row}")
+check("get returns None for a missing thread", threads.get("no-such-thread") is None)
+
+section("deepagent imports resolve")
+
+# A rename inside aishe_pkg silently breaks the backend, and only at restart —
+# which is exactly how the missing threads.get() escaped. deepagent/ is not a
+# package, so put it on sys.path the way server.py itself runs.
+import importlib
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "deepagent"))
+
+ok = True
+detail = ""
+for mod in ("command_policy", "tools", "agent", "server"):
+    try:
+        importlib.import_module(mod)
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        detail = f"{mod}: {exc}"
+check("every deepagent module imports", ok, detail)
+
 if __name__ == "__main__":
     import sys
 

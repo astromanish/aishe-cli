@@ -162,9 +162,33 @@ def web_extract(url: str, max_chars: int = 4000) -> str:
 
 import subprocess as _sp
 
+from command_policy import check as _policy_check
+
+# Cap on how long any single command may run. The tool default is 30s; the
+# policy clamps it so a model asking for timeout=99999 cannot pin the backend.
+_MAX_TIMEOUT = 120
+
+
 @tool
-def run_command(command: str, timeout: int = 30) -> str:
-    """Run a shell command on the host machine and return its output. Use for file listing, system info, git, etc. Example: 'ls -la', 'date', 'pwd', 'git status'."""
+def run_command(command: str, timeout: int = 30, confirmed: bool = False) -> str:
+    """Run a shell command on the host machine and return its output.
+
+    Only read-only commands are allowed automatically (ls, cat, grep, git status,
+    ps, df, ...). Anything else is refused by policy: explain to the user what you
+    wanted to run and let them run it themselves. Never retry a blocked command.
+
+    Pass confirmed=True only after the user has explicitly approved the exact
+    command in this conversation.
+    """
+    allowed, reason = _policy_check(command, confirmed=confirmed)
+    if not allowed:
+        return reason
+
+    try:
+        timeout = max(1, min(int(timeout), _MAX_TIMEOUT))
+    except (TypeError, ValueError):
+        timeout = 30
+
     try:
         r = _sp.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
         out = (r.stdout or "") + (r.stderr or "")

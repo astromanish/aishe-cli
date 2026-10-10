@@ -185,6 +185,23 @@ def resolve_thread_id(explicit: Optional[str] = None, surface: str = "") -> str:
     return str(cfg_get("threads.id", DEFAULT_THREAD_ID) or DEFAULT_THREAD_ID)
 
 
+def get(thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return a thread row (id, title, timestamps), or None.
+
+    Named for what callers expect — `deepagent/server.py` and `add_message` both
+    want the thread back after writing. Note this returns the thread, not its
+    messages; there was no such helper before and two call sites each tried to
+    call a `get()` that did not exist.
+    """
+    _init_db()
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def delete(thread_id: str) -> bool:
     """Delete a thread. Returns True if deleted."""
     _init_db()
@@ -240,11 +257,8 @@ def add_message(thread_id: str, role: str, content: str) -> Optional[Dict[str, A
         _fts_insert(conn, cur.lastrowid, thread_id, role, content)
         conn.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (now, thread_id))
         conn.commit()
-        # Return the persisted thread row. There is no threads.get() helper —
-        # this line called a bare `get(thread_id)` that resolved to the config
-        # import and raised NameError on the FIRST message of every thread.
-        row = conn.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)).fetchone()
-        return dict(row) if row else None
+        # Return the persisted thread row.
+        return get(thread_id)
     finally:
         conn.close()
 
