@@ -5,6 +5,11 @@ __pycache__/
 *.swo
 *~
 
+# Backups — never commit these
+*.bak
+*.bak-*
+.bak-*
+
 # Sidecar runtime artifacts (venv, downloaded models, logs)
 sidecars/.venv/
 sidecars/__pycache__/
