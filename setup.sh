@@ -835,24 +835,8 @@ echo -e "\n  ${BOLD}9. Data Directories${NC}"
 mkdir -p "${DEFAULT_DATA_DIR}/memory" "${DEFAULT_DATA_DIR}/threads"
 pass "Created data directories at ${DEFAULT_DATA_DIR}"
 
-# ── 9. Aishe Live (Electron lite app) ─────────────────────
-echo -e "\n  ${BOLD}10. Aishe Live app (native pixel-pet live mode)${NC}"
-if command -v npm &>/dev/null; then
-    if [ -d "${SCRIPT_SRC}/electron-live/node_modules/electron" ]; then
-        pass "Aishe Live app already installed"
-    else
-        info "Installing Electron app dependencies (one-time)..."
-        if (cd "${SCRIPT_SRC}/electron-live" && npm install --no-fund --no-audit --silent); then
-            pass "Aishe Live app ready — run: aishe live"
-        else
-            warn "npm install failed — run: cd electron-live && npm install"
-        fi
-    fi
-else
-    warn "npm not found — Aishe Live app needs: cd electron-live && npm install"
-fi
-
-# ── Done ───────────────────────────────────────────────────
+# ── 9. Done ─────────────────────────────────────────────────────
+echo -e "\n  ${BOLD}${GREEN}✓ Setup complete!${NC}"
 echo ""
 echo -e "  ${BOLD}╭──────────────────────────────────────╮${NC}"
 echo -e "  ${BOLD}│${NC}        ${GREEN}✨ Setup Complete! ✨${NC}         ${BOLD}│${NC}"
@@ -866,10 +850,9 @@ echo -e "  ${CYAN}Next steps:${NC}"
 echo -e "  1. Run: ${CYAN}aishe status${NC}"
 echo ""
 echo -e "  2. Start chatting: ${CYAN}aishe${NC}"
-echo -e "     Or go live:      ${CYAN}aishe live${NC}   (native pixel-pet app)"
+echo -e "     Desktop app:   ${CYAN}aishe desktop${NC}"
+echo -e "     From Telegram: ${CYAN}aishe telegram start${NC}"
 echo ""
-echo -e "  ${DIM}Note: Ollama + voice (STT/TTS) are installed separately.${NC}"
-echo -e "  ${DIM}Ensure Ollama is running (ollama serve) with a model pulled.${NC}"
-echo -e "  ${DIM}For voice, install STT/TTS sidecars per the README.${NC}"
-echo -e "  ${DIM}Memory uses mem0 + Qdrant (semantic). Falls back to JSONL if Qdrant is down.${NC}"
+echo -e "  ${DIM}Note: Ollama is required for embeddings. Memory uses mem0 + Qdrant.${NC}"
+echo -e "  ${DIM}Voice is Sarvam cloud — set providers.sarvam.api_key.${NC}"
 echo ""

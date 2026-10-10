@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from pathlib import Path
@@ -97,8 +98,14 @@ def get_config_path() -> Path:
 
 
 def load() -> Dict[str, Any]:
-    """Load config, merging defaults with user config."""
-    cfg = dict(DEFAULT_CONFIG)  # shallow copy top-level
+    """Load config, merging defaults with user config.
+
+    Deepcopy the defaults: `dict()` only copies the top level, so nested dicts
+    (providers, services, voice) are shared with DEFAULT_CONFIG. Any code that
+    mutated a nested value on a returned config silently poisoned the defaults
+    for the rest of the process — the next `load()` came back already corrupted.
+    """
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
 
     if not CONFIG_FILE.exists():
         return cfg

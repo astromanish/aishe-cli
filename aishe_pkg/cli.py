@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from aishe_pkg import aishe_core
+
 from . import __version__
 from .config import cmd_config, get, get_config_path, load
 from .memory import cmd_memory, count as mem_count
@@ -161,14 +163,17 @@ def cmd_repl_stream(args: Any) -> None:
 
 # ─── Doctor ─────────────────────────────────────────────────────────────────
 
+# ─── Desktop app launch ──────────────────────────────────────────────────────
+
 def _desktop_app_dir() -> Optional[str]:
-    """Locate the Aishe desktop app directory, or None."""
-    candidates = [
-        os.path.expanduser("~/Documents/projects/aishe-desktop"),
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "aishe-desktop"),
-        os.path.expanduser("~/.local/share/aishe-cli/aishe-desktop"),
-    ]
-    return next((c for c in candidates if os.path.isdir(c)), None)
+    """Locate the Aishe desktop app directory, or None.
+
+    Delegates to `aishe_core`, the shared resolver. Keeping a second copy of
+    this list here is what let the CLI and the desktop disagree about where
+    things live.
+    """
+    d = aishe_core.desktop_dir()
+    return str(d) if d else None
 
 
 def _desktop_launcher(app_dir: str) -> Optional[str]:
@@ -297,11 +302,15 @@ def cmd_doctor(args: Any) -> None:
         which = shutil.which(tool)
         print(f"  {status_dot(which is not None)} {tool:20s} {green(which) if which else red('not found')}")
 
-    # 4. Services
+    # 4. Services — driven by the shared registry so `doctor` and the desktop
+    # can never disagree about which services exist. Qdrant was missing here
+    # even though it serves memory, so a dead vector DB looked like a healthy
+    # system.
     section("Services")
     services = [
         ("DeepAgent", get("services.deepagent", ":8765"), "/health"),
         ("Ollama", get("services.ollama", ":11434"), "/api/tags"),
+        ("Qdrant", get("services.qdrant", ":6333"), "/readyz"),
     ]
     for name, base, endpoint in services:
         url = f"{base}{endpoint}"
@@ -609,9 +618,9 @@ def _restart_deepagent(provider: str, model: str) -> None:
 
     section("Restart DeepAgent")
     print("  Restarting DeepAgent to apply the model...")
-    deepagent_dir = os.path.expanduser("~/.local/share/aishe-cli/deepagent")
-    server_py = os.path.join(deepagent_dir, "server.py")
-    venv_py = os.path.join(deepagent_dir, ".venv", "bin", "python")
+    deepagent_dir = str(aishe_core.deepagent_dir())
+    server_py = str(aishe_core.deepagent_server())
+    venv_py = str(aishe_core.deepagent_venv())
 
     if os.path.exists(server_py) and os.path.exists(venv_py):
         # Stop the running DeepAgent by matching its working directory (avoids
@@ -697,15 +706,13 @@ def _setup_telegram() -> None:
 
 
 def _telegram_bot_path() -> str:
-    """Locate telegram_bot.py — in the repo clone or the installed sidecars dir."""
-    candidates = [
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sidecars", "telegram_bot.py"),
-        os.path.expanduser("~/.local/share/aishe-cli/sidecars/telegram_bot.py"),
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    return candidates[0]
+    """Locate telegram_bot.py via the shared resolver.
+
+    This used to probe two hardcoded paths, one of which (`~/.local/share`)
+    does not hold the sidecar on a repo-checkout install, so `aishe gateway`
+    could not find its own bridge.
+    """
+    return str(aishe_core.telegram_bot())
 
 
 def _telegram_pid() -> Optional[str]:
@@ -996,6 +1003,7 @@ def cmd_status(args: Any = None) -> None:
     services = [
         ("Ollama", get("services.ollama", "http://localhost:11434"), "/api/tags"),
         ("DeepAgent", get("services.deepagent", "http://localhost:8765"), "/health"),
+        ("Qdrant", get("services.qdrant", "http://localhost:6333"), "/readyz"),
     ]
 
     section("Services")

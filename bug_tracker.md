@@ -1,85 +1,92 @@
-# Aishe CLI — Bug Tracker
+# Aishe — Bug Tracker
 
-Repo: `~/Documents/aishe/aishe-cli` · Branch: `main` · Last audited: 2026-08-09
-Scope: `aishe` + `aishe_pkg/*.py`
+Scope: `aishe_pkg/*.py`, `deepagent/`, `sidecars/`, `aishe-desktop/`
+Last audited: 2026-10-10
 
-Status legend: `OPEN` = unfixed · `FIXED` = resolved this session · `WONTFIX` = accepted/known · `REMOVED` = feature deleted
-
----
-
-## Cleanup — 2026-08-09
-
-Four rounds of feature removal per user request:
-
-**Round 1 — removed:**
-- **Intent Lab** — `intent` subcommand, `cmd_intent`, `intent_lab/` data dir, completions, README
-- **Ollama management** — `aishe ollama` subcommand, `ollama.py`, completions, README. **Ollama kept as the LLM backend** (DeepAgent still talks to `:11434`; `status`/`doctor` still health-check it).
-- **Pet blob** — `pet.py`, `blob.py`, `pet_attach.py`, all `send_signal`/`PetState` hooks, completions, README, `util.welcome` hint.
-
-**Round 2 — removed standalone subcommands (underlying modules kept):**
-- **`repl`** — `cmd_repl` deleted. `threads.py` kept (stream/live still persist conversations).
-- **`threads`** — `cmd_threads` deleted. `threads.py` module kept for stream/live persistence.
-- **`voice`** — `cmd_voice` deleted. `voice.py` module kept (live uses STT/TTS).
-- **`export`** — `cmd_export` deleted entirely.
-- **`search`** — `cmd_search` deleted entirely.
-- **`completions`** — `cmd_completions` deleted entirely.
-
-**Round 3 — removed `chat`, added bare-`aishe` streaming:**
-- **`chat`** — `cmd_chat` deleted. One-shot non-streaming chat removed.
-- **Bare `aishe`** (no subcommand) now launches an **interactive streaming loop** (`cmd_repl_stream`): type a message, get a streaming reply, repeat. `/exit` or Ctrl+C to quit.
-
-**Round 4 — removed `stream`, unified into bare `aishe`, moved data to `~/aishe`:**
-- **`stream`** — `cmd_stream` deleted. Streaming is now the default behavior of bare `aishe`.
-- **Bare `aishe`** now handles both modes via `_stream_once`:
-  - `aishe "message"` → one-shot streaming reply
-  - `echo "hi" | aishe` → one-shot from stdin (non-TTY)
-  - `aishe` (no args, TTY) → interactive streaming loop
-- **Data dir** — all user data now lives in **`~/aishe`** on every platform (was `~/Library/Application Support/aishe` on macOS, `~/.local/share/aishe` on Linux, `~/AppData/Local/aishe` on Windows). Updated `config._default_data_dir()`, `threads.py`, `memory.py`, `setup.sh`. Existing data migrated to `~/aishe`.
-
-**Remaining commands:** `status`, `live`, `memory`, `config`, `doctor`, `version` + bare `aishe` (streaming chat).
-
-Files deleted: `aishe_pkg/pet.py`, `aishe_pkg/blob.py`, `aishe_pkg/pet_attach.py`, `aishe_pkg/ollama.py`.
-
-Bugs that became moot (feature removed): BUG-004 (ollama dead code), BUG-006 (pet path), BUG-007 (intent path).
+Status legend: `OPEN` = unfixed · `FIXED` = resolved · `REMOVED` = feature deleted
 
 ---
 
-## OPEN — Confirmed bugs
+## FIXED — 2026-10-10 · single shared core
 
-### BUG-009 · Thread persistence broken — user & assistant turns land in different threads
-- **File:** `aishe_pkg/threads.py` (`ensure_thread` / `create` / `add_message`)
-- **Severity:** **High** (core feature broken)
-- **Repro:** `aishe "What is (15*4)/3?"` → creates TWO thread files: one titled `"cli"` with only the assistant message, another auto-titled from the user message with only the user message.
-- **Cause:** `add_message(tid, ...)` → `ensure_thread(tid)` → `get(tid)` looks for a file named `<tid>.json` (e.g. `cli.json`), but `create()` always generates a fresh `thr_{uuid}` id and stores under that name. The logical thread id is never used as the actual storage key.
-- **Impact:** Every bare-aishe/live turn fragments into separate 1-message threads. Conversation history is never actually preserved.
-- **Fix:** Make `create()` honor a caller-supplied id (store under `<tid>.json` when the tid is a stable logical name like `cli`/`live`), or have `ensure_thread` map the logical tid to the existing file.
+The audit that prompted `aishe_pkg/aishe_core.py`. Everything below is fixed.
 
-### BUG-001 · `config.load()` shallow-copies DEFAULT_CONFIG → nested defaults get mutated
-- **File:** `aishe_pkg/config.py:73`
+### FIXED · Three surfaces disagreed about where the backend lives
+- **Severity:** High — silently ran two different copies of DeepAgent
+- `aishe-desktop/lib/control.js` resolved `~/Documents/projects/aishe-cli/deepagent`;
+  `start-all.sh` hardcoded `~/.local/share/aishe-cli/deepagent`; the CLI's own
+  lookups probed paths that don't exist on this machine.
+- **Impact:** two divergent backends racing for `:8765`. The one that won was
+  decided by whichever tool started first, so edits to one copy appeared to do
+  nothing.
+- **Fix:** `aishe_pkg/aishe_core.py` is now the single resolver. The desktop
+  reaches it through `aishe-desktop/lib/core.js`; `start-all.sh` calls it via a
+  bash helper with a hardcoded fallback so the script never hard-fails.
+- **Test:** the desktop asserts both paths are identical
+  (`control: deepagent resolves to the same place the CLI resolves it`);
+  `aishe-cli/tests/test_aishe_core.py` covers resolution and `AISHE_HOME`.
+
+### FIXED · `aishe doctor` and `aishe status` never checked Qdrant
+- **Severity:** Medium — a dead vector DB looked like a healthy system
+- Only the desktop managed Qdrant; neither CLI command probed it. Memory
+  silently degraded to the JSONL fallback with nothing reporting why.
+- **Fix:** Qdrant is in the shared `SERVICES` registry, both commands probe it,
+  and `start-all.sh` starts it.
+
+### FIXED · BUG-001 · `config.load()` shallow-copied DEFAULT_CONFIG
 - **Severity:** Medium
-- **Fix:** Use `copy.deepcopy(DEFAULT_CONFIG)` in `load()`.
+- `dict(DEFAULT_CONFIG)` copies only the top level, so nested dicts (`providers`,
+  `services`, `voice`) were shared. Mutating a nested value on a returned config
+  poisoned the defaults for the rest of the process.
+- **Fix:** `copy.deepcopy(DEFAULT_CONFIG)`.
+
+### REMOVED · dead code shipped in the repo
+- `sidecars/stt_server.py`, `sidecars/tts_server.py` — the pre-Sarvam local voice
+  servers (`:5093`/`:8766`). Voice is cloud-only now; nothing referenced them.
+- `sidecars/sarvam_stt_server.py`, `sidecars/sarvam_tts_server.py` — orphaned
+  cloud adapters. `aishe_pkg/voice.py` calls Sarvam directly.
+- `sidecars/aishe-voice` — a port-swap shim that existed only for the deleted
+  `electron-live` app.
+- `setup.sh` — the electron-live `npm install` block (could never pass, always
+  warned) and the macOS `launchctl` STT/TTS branches in `start-all.sh`.
+
+### FIXED · stale documentation
+- `README.md` documented `aishe live` and `electron-live`, both deleted.
+- `sidecars/README.md` documented the removed local voice stack in full.
+- This tracker was last audited 2026-08-09 and described 10 removed commands as
+  current.
 
 ---
 
-## FIXED — Resolved this session
+## FIXED — earlier sessions
 
-### BUG-005 · `_slugify()` in threads.py was dead code
-- **File:** `aishe_pkg/threads.py`
-- **Severity:** Low (dead code)
-- **Fix:** Removed `_slugify()` (and the now-unused `re` import) during Round 2 cleanup.
+### FIXED · BUG-009 · thread persistence fragmented every turn
+- User and assistant turns landed in different threads; `add_message` looked for
+  `<tid>.json` while `create()` always generated a fresh `thr_{uuid}`.
+- **Fix:** single shared thread (`main`) across CLI, desktop and Telegram.
+- **Verified:** all 44 messages in `~/aishe/aishe.db` are under `main`; zero
+  fragmented thread files.
 
-### BUG-008 · REPL `/delete` crashed with NameError (delete not imported)
-- **File:** `aishe_pkg/cli.py`
-- **Severity:** High (crash)
-- **Fix:** Added `delete as thr_delete` to the import and changed the call site to `thr_delete(target)`. (Note: `repl` subcommand since removed, but the fix was correct at the time.)
+### FIXED · Telegram sends with `parse_mode` unset
+- Aishe's Markdown (`**bold**`) is not valid Telegram Markdown. Setting the mode
+  made the API reject the send, so the bot looked like it had hung.
+- **Fix:** `parse_mode` is left null; tool calls are rendered as readable
+  one-liners by `describe_tool(name, args)`.
 
 ---
 
-## Notes / observations (not bugs)
+## OPEN
 
-- `aishe` version still reports `v2.0.0` despite multiple feature commits. Consider bumping to `v2.1.0`.
-- `voice speak`/`voice transcribe`/`voice status` subcommands removed — voice is now only reachable via `aishe live`.
-- Thread management subcommands removed — thread persistence is now implicit (bare-aishe/live auto-create threads).
-- Bare `aishe` uses `getattr(args, "thread", None) or "cli"` since the no-subcommand namespace has no `--thread` flag.
-- Bare `aishe` one-shot intercepts `sys.argv` before argparse (first arg not a known subcommand → treated as message), because argparse can't mix a free-form positional with subparsers.
-- Data dir is now `~/aishe` on all platforms; config `data.dir` key points there.
+_None. The audit is closed out; new issues get added here._
+
+---
+
+## Notes
+
+- `aishe version` reports `2.0.0`. Consider bumping.
+- **The CLI has no test suite** beyond `tests/test_aishe_core.py`. The desktop has
+  46. A regression in `aishe_pkg/` currently ships unnoticed — worth filling in
+  before a real daily user.
+- Voice config once drifted to `language_code: bn-IN` / `stt_mode: translate`,
+  which surfaced as an unrelated test failure. Anything writing voice config
+  should go through the same validation the model picker now uses.

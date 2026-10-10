@@ -13,6 +13,40 @@ up_() { # up_ NAME PORT -> 0 if a listener is on PORT
   lsof -nP -iTCP:"$2" -sTCP:LISTEN >/dev/null 2>&1
 }
 
+# Resolve a path through aishe_core, the single shared resolver every surface
+# uses. Falls back silently to the installed location if the Python resolver is
+# unavailable (e.g. no interpreter on PATH), so this script never hard-fails.
+aishe_core_deepagent_dir() {
+  local py repo
+  py="$(command -v python3 || command -v python)" || return 1
+  repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  "$py" -c "
+import sys
+sys.path.insert(0, '$repo')
+try:
+    from aishe_pkg import aishe_core
+    print(aishe_core.deepagent_dir())
+except Exception:
+    sys.exit(1)
+" 2>/dev/null || return 1
+}
+
+# The install root, from the same resolver.
+aishe_core_home() {
+  local py repo
+  py="$(command -v python3 || command -v python)" || { echo "$HOME/.local/share/aishe-cli"; return; }
+  repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  "$py" -c "
+import sys
+sys.path.insert(0, '$repo')
+try:
+    from aishe_pkg import aishe_core
+    print(aishe_core.home())
+except Exception:
+    sys.exit(1)
+" 2>/dev/null || echo "$HOME/.local/share/aishe-cli"
+}
+
 echo
 echo "  ${GREEN}╭──────────────────────────────────────╮${RESET}"
 echo "  ${GREEN}│      Aishe — starting all services   │${RESET}"
@@ -26,27 +60,41 @@ if up_ "ollama" 11434; then
   up   "Ollama" ":11434 (already running)"
 else
   echo -n "  Starting Ollama... "
-  if open -a Ollama 2>/dev/null || launchctl start ollama 2>/dev/null; then
+  # `open` is macOS-only and a no-op failure on Linux, so try it first and fall
+  # back to `ollama serve` — the macOS branch used to `launchctl start` here,
+  # which never does anything on a Linux box.
+  if open -a Ollama 2>/dev/null || nohup ollama serve >/tmp/ollama.log 2>&1 & then
     # wait up to 15s
     for _ in $(seq 1 15); do up_ "ollama" 11434 && break; sleep 1; done
   fi
   if up_ "ollama" 11434; then up "Ollama" ":11434"; else down "Ollama" ":11434 — start it manually"; fail=1; fi
 fi
 
-# 2. launchd STT / TTS ---------------------------------------------------
-for svc in com.opencode.parakeet-stt:5093 com.opencode.supertonic:8766; do
-  name="${svc%%:*}"; port="${svc##*:}"
-  if up_ "$name" "$port"; then
-    up   "${name#com.opencode.}" ":${port}"
-  else
-    launchctl start "$name" 2>/dev/null
-    sleep 1
-    if up_ "$name" "$port"; then up "${name#com.opencode.}" ":${port}"; else down "${name#com.opencode.}" ":${port} — launchctl start ${name}"; fail=1; fi
-  fi
-done
+# 2. Qdrant (vector DB for memory) ----------------------------------------
+# Qdrant was managed only by the desktop app before, so starting Aishe from the
+# CLI left memory silently degraded to the JSONL fallback. It is a first-class
+# service now, driven by the same registry both surfaces read.
+QD="$(aishe_core_home)/qdrant"
+QDRANT_BIN="$HOME/.local/bin/qdrant"
+if up_ "Qdrant" 6333; then
+  up "Qdrant" ":6333 (already running)"
+elif [ -x "$QDRANT_BIN" ]; then
+  echo -n "  Starting Qdrant... "
+  mkdir -p "$QD"
+  (cd "$QD" && "$QDRANT_BIN" >/tmp/qdrant.log 2>&1 &)
+  for _ in $(seq 1 15); do up_ "Qdrant" 6333 && break; sleep 1; done
+  if up_ "Qdrant" 6333; then up "Qdrant" ":6333"; else down "Qdrant" ":6333 — check /tmp/qdrant.log"; fail=1; fi
+else
+  warn "Qdrant not installed (expected at $QDRANT_BIN) — memory will use the JSONL fallback"
+fi
 
 # 3. DeepAgent sidecar ----------------------------------------------------
-DA="$HOME/.local/share/aishe-cli/deepagent"
+# Resolve the backend through the shared resolver rather than a hardcoded path.
+# start-all.sh used to point only at ~/.local/share/aishe-cli/deepagent, so on a
+# repo checkout it launched a *different* copy of deepagent than the desktop app
+# did — two divergent backends racing for :8765, with the winner decided by
+# whichever tool started first.
+DA="$(aishe_core_deepagent_dir 2>/dev/null || echo "$HOME/.local/share/aishe-cli/deepagent")"
 if up_ "DeepAgent" 8765; then
   up   "DeepAgent" ":8765 (already running)"
 else
@@ -67,7 +115,7 @@ fi
 
 echo
 if [ "$fail" -eq 0 ]; then
-  echo "  ${GREEN}✓ All Aishe services up.${RESET}  Try: ${DIM}aishe live${RESET}  or  ${DIM}aishe status${RESET}"
+  echo "  ${GREEN}✓ All Aishe services up.${RESET}  Try: ${DIM}aishe status${RESET}  or  ${DIM}aishe desktop${RESET}"
 else
   echo "  ${YEL}Some services failed — see statuses above.${RESET}"
 fi

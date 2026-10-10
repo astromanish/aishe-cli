@@ -1,6 +1,22 @@
-# Aishe CLI
+# Aishe
 
-Privacy-first AI assistant for your terminal — streaming chat, live voice, and persistent memory.
+A personal AI assistant that works from the terminal, the desktop, and Telegram —
+one agent, one memory, one conversation.
+
+Not a chatbot bolted onto three frontends: all three surfaces talk to the same
+DeepAgent backend over the same conversation thread, so a message sent from your
+phone continues the exact conversation you were having in the terminal.
+
+## Surfaces
+
+| Surface | How you reach it |
+|---------|------------------|
+| Terminal | `aishe` |
+| Desktop | `aishe desktop` — Electron app: chat, voice, history, memory, keys |
+| Telegram | `aishe telegram start` — long-polling bridge |
+
+This repository is the CLI. The desktop app is
+[aishe-desktop](https://github.com/astromanish/aishe-desktop).
 
 ## Install
 
@@ -11,68 +27,100 @@ curl -fsSL https://raw.githubusercontent.com/astromanish/aishe-cli/main/setup.sh
 ## Usage
 
 ```bash
-aishe                    # interactive streaming chat
-aishe "What is 15 * 4?"  # one-shot streaming chat
-aishe live               # live voice — native Electron lite app (pixel pet: push-to-talk + always-listening live voice)
-aishe live --cli         # terminal voice REPL (press Enter to record) instead of the Electron app
-aishe status             # service health
-aishe memory add "fact"  # save a fact
-aishe memory search "x"  # search memory
-aishe memory list        # list memory
-aishe memory clear       # clear memory
-aishe config             # view config
-aishe config get <key>   # get a config value
-aishe config set <k> <v> # set a config value
-aishe setup              # choose your Ollama model + optional Telegram setup
-aishe telegram status    # Telegram bridge status
-aishe telegram auth <token>  # save bot token
-aishe gateway start      # start the Telegram connection bridge
-aishe gateway restart    # restart the Telegram bridge
-aishe gateway stop       # stop the Telegram bridge
-aishe doctor             # run diagnostics
-aishe version            # show version
+aishe                        # interactive streaming chat
+aishe "What is 15 * 4?"      # one-shot streaming chat
+aishe desktop                # open the desktop app
+aishe status                 # service health
+aishe doctor                 # full diagnostics
+aishe start-all              # bring up every service
+
+aishe memory add "fact"      # save a fact
+aishe memory search "query"  # search memory
+aishe memory status          # embedder / plugin / vector DB
+
+aishe config                 # view config
+aishe config set <key> <v>   # set a value
+
+aishe telegram start|status|stop
+aishe gateway start|restart|stop|status
+aishe version
 ```
 
-In the interactive loop, use `/exit` or Ctrl+C to quit.
+In the interactive loop, `/exit` or Ctrl+C quits.
 
-`aishe setup` lists your pulled Ollama models, lets you pick one (or type a
-new model name to pull), saves it, restarts DeepAgent to apply it, and
-optionally walks you through connecting Telegram (bot token + your user id).
+## One shared foundation
 
-### Telegram bridge
+Everything resolves through [`aishe_pkg/aishe_core.py`](aishe_pkg/aishe_core.py)
+— where the backend lives, where the desktop app lives, where the sidecars live,
+and which services exist on which ports.
 
-Chat with Aishe from Telegram:
+That module exists because the alternative already happened once: the CLI,
+`start-all.sh` and the desktop each hardcoded their own paths, and they drifted.
+Two divergent copies of DeepAgent ended up competing for `:8765`, with the winner
+decided by whichever tool launched first.
 
-1. Get a bot token from **@BotFather** (`/newbot`).
-2. Run `aishe setup` and choose "yes" for the Telegram bridge, or:
-   ```bash
-   aishe telegram auth <bot_token>
-   ```
-3. Add your Telegram user id (get it from @userinfobot) via the setup prompt.
-4. Start the bridge:
-   ```bash
-   aishe gateway start
-   aishe gateway status   # verify it's running
-   ```
-5. Message your bot on Telegram — Aishe replies via DeepAgent. Each chat keeps
-   its own conversation in `~/aishe/threads/`.
+```python
+from aishe_pkg import aishe_core
 
-Manage it anytime with `aishe gateway start|restart|stop|status`.
+aishe_core.deepagent_dir()     # where server.py is
+aishe_core.desktop_dir()       # the Electron app
+aishe_core.telegram_bot()      # the Telegram sidecar
+aishe_core.SERVICES            # deepagent :8765, ollama :11434, qdrant :6333
+aishe_core.describe()          # all of the above, with existence flags
+```
+
+Resolution order: `AISHE_HOME` override → the repo checkout (so an editable
+clone is authoritative) → `~/.local/share/aishe-cli`. Set `AISHE_HOME` to
+relocate the whole tree at once.
+
+## Services
+
+| Service | Port | Health | Purpose |
+|---------|------|--------|---------|
+| DeepAgent | 8765 | `/health` | the agent: tools, memory, model routing |
+| Ollama | 11434 | `/api/tags` | local models, embeddings |
+| Qdrant | 6333 | `/readyz` | vector DB for semantic memory |
+
+Voice is **not** a service. STT and TTS go straight to Sarvam's cloud API
+(Saaras v3 and Bulbul v3) — no local ports, no models to download.
+
+`aishe doctor` and the desktop's service panel read the same registry, so they
+can't disagree about what's healthy.
+
+## Memory
+
+Two layers:
+
+- **Vector** — mem0 + Qdrant (`aishe_memories`), embeddings by
+  `qwen3-embedding:0.6b` on Ollama. This is semantic search.
+- **Short-term** — SQLite with FTS5 at `~/aishe/aishe.db`, which is what
+  `aishe search` queries.
+
+Check both with `aishe memory status`.
 
 ## Requirements
 
 - Python 3.9+, `requests`, `pyyaml`, `ffmpeg`
-- Services: Ollama, DeepAgent, STT, TTS
-- Voice sidecars are opt-in: `AISHE_INSTALL_VOICE=1 bash setup.sh`
+- Ollama (for embeddings), and Qdrant for vector memory
+- A Sarvam API key for voice
+- A provider key for whichever chat model you use
 
 ## Data
 
-All data lives in `~/aishe` on every platform:
+All data lives in `~/aishe`:
 
-- `~/aishe/memory/facts.jsonl` — memory
-- `~/aishe/threads/*.json` — conversations
+- `~/aishe/aishe.db` — conversations, FTS5-indexed
+- `~/aishe/memory/` — short-term memory files
 
 Config: `~/.config/aishe/config.yaml`
+
+## Development
+
+```bash
+python tests/test_aishe_core.py    # path resolver + service registry
+```
+
+The desktop app has its own suite: `cd aishe-desktop && npm test`.
 
 ## License
 
