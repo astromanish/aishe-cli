@@ -461,13 +461,13 @@ def _setup_input(prompt: str) -> str:
 
 def _ensure_api_key(provider: str, info: Dict[str, Any]) -> str:
     """Ensure an API key exists for a cloud provider; return the key in use."""
-    from .config import get as cfg_get, set_key as cfg_set
+    from .config import get as cfg_get, mask_key, set_key as cfg_set
 
     key = cfg_get(f"providers.{provider}.api_key", "")
     if not info.get("needs_key"):
         return key or info.get("key_default", "")
     if key:
-        masked = (key[:4] + "…" + key[-4:]) if len(key) > 10 else "set"
+        masked = mask_key(key)
         print(f"  {green('✓')} API key already set: {dim(masked)}")
         resp = _setup_input("  Change API key? (leave blank to keep) ▶ ")
         if resp:

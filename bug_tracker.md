@@ -33,6 +33,25 @@ The audit that prompted `aishe_pkg/aishe_core.py`. Everything below is fixed.
 - **Fix:** Qdrant is in the shared `SERVICES` registry, both commands probe it,
   and `start-all.sh` starts it.
 
+### FIXED — 2026-10-10 · bugs found by the new test suite
+
+### FIXED · `add_message()` raised NameError on every first message
+- **Severity:** High — found by the new tests, not by usage
+- `add_message` ended with `return get(thread_id)`, but `threads.py` has no
+  `get()` — the name resolved to the `from .config import get` import and raised
+  `NameError` the first time a thread was written.
+- **Fix:** return the persisted thread row directly.
+
+### FIXED · `AISHE_HOME` did not relocate the data dir
+- **Severity:** High — tests were writing into the live `~/aishe/aishe.db`
+- `DATA_DIR = Path(get("data.dir", …))` reads the user's real config.yaml first,
+  which hardcodes an absolute path, so the `AISHE_HOME` override never applied.
+  The same bug meant `memory.add()` reached the live DeepAgent → mem0 → Qdrant,
+  so a test run could POST junk facts into real memory and `clear()` would wipe it.
+- **Fix:** `threads._resolve_data_dir()` checks `AISHE_HOME` before the config
+  file; `config._default_data_dir()` honours it too; `AISHE_MEMORY_OFFLINE=1`
+  forces the JSONL fallback. The harness sets both.
+
 ### FIXED · BUG-001 · `config.load()` shallow-copied DEFAULT_CONFIG
 - **Severity:** Medium
 - `dict(DEFAULT_CONFIG)` copies only the top level, so nested dicts (`providers`,
@@ -77,16 +96,22 @@ The audit that prompted `aishe_pkg/aishe_core.py`. Everything below is fixed.
 
 ## OPEN
 
-_None. The audit is closed out; new issues get added here._
+### The CLI now has a test suite — 70 assertions, 4 suites
+
+`python tests/run.py` runs `test_aishe_core.py` (15), `test_config.py` (26),
+`test_threads.py` (16) and `test_memory.py` (13). Tests run against a throwaway
+`AISHE_HOME` with `AISHE_MEMORY_OFFLINE=1`, so they never touch the real
+`~/aishe` or the live mem0/Qdrant store.
+
+Still uncovered: `aishe_pkg/voice.py`, `aishe_pkg/util.py`,
+`aishe_pkg/dashboard.py`, `deepagent/server.py`, `deepagent/tools.py` and
+`sidecars/telegram_bot.py`.
 
 ---
 
 ## Notes
 
 - `aishe version` reports `2.0.0`. Consider bumping.
-- **The CLI has no test suite** beyond `tests/test_aishe_core.py`. The desktop has
-  46. A regression in `aishe_pkg/` currently ships unnoticed — worth filling in
-  before a real daily user.
 - Voice config once drifted to `language_code: bn-IN` / `stt_mode: translate`,
   which surfaced as an unrelated test failure. Anything writing voice config
   should go through the same validation the model picker now uses.

@@ -15,6 +15,7 @@ in soul.md / user.md.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
 from datetime import datetime
@@ -44,6 +45,14 @@ def _now() -> str:
 # ─── Vector memory via DeepAgent HTTP (primary) ────────────────────────────
 
 def _deepagent_up() -> bool:
+    """Is the DeepAgent sidecar answering?
+
+    `AISHE_MEMORY_OFFLINE=1` forces the JSONL fallback. Tests set it so they can
+    never write into the live mem0/Qdrant store — `memory.add()` would otherwise
+    POST real facts into production memory, and `memory.clear()` would wipe it.
+    """
+    if os.environ.get("AISHE_MEMORY_OFFLINE") == "1":
+        return False
     try:
         import requests
         return requests.get(f"{DEEPAGENT_URL}/health", timeout=2).status_code == 200

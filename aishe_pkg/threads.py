@@ -10,15 +10,31 @@ On first init, existing JSON thread files are imported automatically
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import get
+from .config import get as _cfg_get
 
-DATA_DIR = Path(get("data.dir", str(Path.home() / "aishe")))
+
+def _resolve_data_dir() -> Path:
+    """The data dir, with `AISHE_HOME` always winning.
+
+    `get("data.dir", …)` reads the user's real config.yaml first, which hardcodes
+    an absolute path — so a test (or a relocated install) that sets AISHE_HOME
+    would still be pointed at the live `~/aishe/aishe.db` and could corrupt real
+    conversations. The override has to be checked before the file.
+    """
+    override = os.environ.get("AISHE_HOME")
+    if override:
+        return Path(override)
+    return Path(_cfg_get("data.dir", str(Path.home() / "aishe")))
+
+
+DATA_DIR = _resolve_data_dir()
 THREADS_DIR = DATA_DIR / "threads"
 DB_PATH = DATA_DIR / "aishe.db"
 
@@ -224,7 +240,11 @@ def add_message(thread_id: str, role: str, content: str) -> Optional[Dict[str, A
         _fts_insert(conn, cur.lastrowid, thread_id, role, content)
         conn.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (now, thread_id))
         conn.commit()
-        return get(thread_id)
+        # Return the persisted thread row. There is no threads.get() helper —
+        # this line called a bare `get(thread_id)` that resolved to the config
+        # import and raised NameError on the FIRST message of every thread.
+        row = conn.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
 

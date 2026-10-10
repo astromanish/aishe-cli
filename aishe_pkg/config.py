@@ -17,7 +17,16 @@ except ImportError:
 # ─── Platform paths ─────────────────────────────────────────
 
 def _default_data_dir() -> str:
-    """Data directory — always `~/aishe` on every platform."""
+    """Data directory — always `~/aishe` on every platform.
+
+    `AISHE_HOME` overrides it so a checkout, a container or a test can relocate
+    the whole tree without editing code. `aishe_core` documents that variable as
+    the single switch for everything, so the data dir has to honour it too —
+    otherwise relocating only moves the backend and leaves conversations behind.
+    """
+    override = os.environ.get("AISHE_HOME")
+    if override:
+        return str(Path(override))
     return str(Path.home() / "aishe")
 
 
@@ -122,6 +131,24 @@ def load() -> Dict[str, Any]:
         print(f"Warning: Failed to load config: {e}", file=sys.stderr)
 
     return cfg
+
+
+def mask_key(key: str) -> str:
+    """Reduce an API key to a short fingerprint for display.
+
+    Config stores keys in this masked form, so `aishe config` cannot leak a live
+    credential even though it dumps the whole file. Keep the first and last 4
+    characters — enough to tell two keys apart, not enough to use one.
+
+    Anything 10 chars or shorter is not a real key; report it as "set" rather
+    than revealing most of it.
+    """
+    key = str(key or "")
+    if not key:
+        return ""
+    if len(key) <= 10:
+        return "set"
+    return f"{key[:4]}…{key[-4:]}"
 
 
 def save(cfg: Dict[str, Any]) -> None:

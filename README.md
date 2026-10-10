@@ -117,8 +117,13 @@ Config: `~/.config/aishe/config.yaml`
 ## Development
 
 ```bash
-python tests/test_aishe_core.py    # path resolver + service registry
+python tests/run.py              # all suites (config, threads, memory, core)
+python tests/run.py config       # one suite
+python tests/test_threads.py     # a suite directly
 ```
+
+70 assertions across 4 suites. Tests run against a throwaway `AISHE_HOME` and
+never touch the real `~/aishe` or the live mem0/Qdrant store.
 
 The desktop app has its own suite: `cd aishe-desktop && npm test`.
 
